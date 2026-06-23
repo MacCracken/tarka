@@ -5,6 +5,15 @@
 
 ## Version
 
+**1.0.0** — 2026-06-22. **v1.0 — clean cut; the RL→reasoning reference is complete + frozen.**
+Public API frozen + documented (`docs/api.md`: stable 1.x surface, internal mechanism
+out-of-freeze) and a downstream consumer green (`examples/quickstart.cyr` — REINFORCE via the
+public API, 1.58→23.94). All six v1.0 criteria met: ✅ API frozen+documented · ✅ 24/24
+grad-checks · ✅ benchmarks · ✅ downstream consumer · ✅ CHANGELOG complete · ✅ security audit.
+No code change from 0.9.0 — the freeze + consumer close the last criteria. The full arc
+(REINFORCE → actor-critic → reward models → verifier-guided reasoning incl. beam search) is
+the agency counterpoint to attn11. Pin 6.2.37.
+
 **0.9.0** — 2026-06-22. **Optimization + documentation.** `docs/benchmarks.md` (v1.0
 criterion) captures every demo number with methodology + reproduction; README reflects the
 built arc + a headline-results table + akshara; getting-started gains a module map.
@@ -142,6 +151,13 @@ is the eventual downstream.)
 - **0.7.0 — ✅ done**: PRM-guided beam search (the reasoning arc is closed).
 - **0.8.0 — ✅ done**: security/hardening audit (0 reachable bugs; precondition guards) + pin 6.2.37.
 - **0.9.0 — ✅ done**: benchmarks.md (v1.0 criterion) + doc polish + Adam loop-invariant hoist.
-- **1.0.0** — clean cut (the v1.0 release): API freeze + the remaining v1.0 criteria.
+- **1.0.0 — ✅ SHIPPED**: clean cut — API freeze (`docs/api.md`) + downstream consumer
+  (`examples/quickstart.cyr`); all six v1.0 criteria met. **tarka is v1.0.**
+
+## Post-1.0
+
+The reference is complete. Natural next levers (post-1.0, user-driven): a `--gpu` backend
+(rosnet-gpu + mabda), MCTS on a task that warrants it, or extracting reusable primitives to a
+shared lib (the rosnet/tyche/akshara pattern) once a second consumer appears.
 
 See [`roadmap.md`](roadmap.md).

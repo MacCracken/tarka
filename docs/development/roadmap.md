@@ -4,13 +4,13 @@
 > this file is the sequencing — what ships, in what order, against
 > what dependency gates.
 
-## v1.0 criteria
+## v1.0 criteria — ✅ ALL MET (shipped 1.0.0, 2026-06-22)
 
-- [ ] Public RL/reasoning API frozen — every exported symbol documented and tested
+- [x] Public RL/reasoning API frozen — documented ([`docs/api.md`](../api.md)) and tested (1.0.0)
 - [x] Every hand-derived backward op finite-difference grad-checked (attn11 discipline) — **24/24**
 - [x] Benchmarks captured in [`docs/benchmarks.md`](../benchmarks.md) (0.9.0)
-- [ ] At least one downstream consumer green
-- [ ] CHANGELOG complete from v0.1.0 onward
+- [x] At least one downstream consumer green — [`examples/quickstart.cyr`](../../examples/quickstart.cyr) (1.0.0)
+- [x] CHANGELOG complete from v0.1.0 onward
 - [x] Security audit pass — [`docs/audit/2026-06-22-audit.md`](../audit/2026-06-22-audit.md) (0.8.0: 0 reachable bugs)
 
 ## Milestones
@@ -106,8 +106,9 @@ the remaining versions are about finish quality.
 - **0.9.0 — ✅ optimization + documentation**: [`docs/benchmarks.md`](../benchmarks.md)
   (v1.0 criterion) + README/getting-started polish + Adam loop-invariant hoist (byte-identical
   numerics; the demo is rollout/matmul-bound, so no wall-clock change — kept for leanness).
-- **1.0.0 — clean cut**: the v1.0 release. Remaining criteria: public API frozen + documented,
-  ≥1 downstream consumer green, CHANGELOG complete.
+- **1.0.0 — ✅ SHIPPED** (clean cut): public API frozen + documented ([`docs/api.md`](../api.md)),
+  downstream consumer green ([`examples/quickstart.cyr`](../../examples/quickstart.cyr)),
+  CHANGELOG complete. **All six v1.0 criteria met — tarka is v1.0.**
 
 ## Out of scope (for v1.0)
 

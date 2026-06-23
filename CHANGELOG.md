@@ -4,6 +4,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-22
+
+**v1.0 — the RL → reasoning reference is complete and frozen.** From the assembly up, with no
+RL framework, no autodiff, no BLAS: REINFORCE → actor-critic (PPO/GRPO + value critic + GAE) →
+learned reward / process-reward models → verifier-guided reasoning (self-consistency,
+best-of-N, PRM-guided beam search). Every hand-derived backward is finite-difference
+grad-checked; every method clears a falsifiable acceptance gate. tarka is the **agency
+counterpoint to attn11**: attn11 proves gradient-based *representation learning* is expressible
+in everything-is-i64 Cyrius; tarka proves the same for *deliberate, reward-driven
+problem-solving*.
+
+### Added
+- **Public API freeze** — [`docs/api.md`](docs/api.md): the stable 1.x surface (policy +
+  REINFORCE, PPO/GRPO, reward/process-reward models, reasoning, search), every symbol
+  documented with where it is tested; the internal mechanism is explicitly out of the freeze.
+- **Downstream consumer** — [`examples/quickstart.cyr`](examples/quickstart.cyr): a standalone
+  program that consumes the public API (REINFORCE in ~20 lines), builds and runs green
+  (reward 1.58 → 23.94).
+
+### v1.0 criteria — all met
+- [x] Public RL/reasoning API frozen — documented (`docs/api.md`) and tested.
+- [x] Every hand-derived backward finite-difference grad-checked — **24/24** (`cyrius test`).
+- [x] Benchmarks captured — [`docs/benchmarks.md`](docs/benchmarks.md).
+- [x] At least one downstream consumer green — `examples/quickstart.cyr`.
+- [x] CHANGELOG complete from v0.1.0 onward.
+- [x] Security audit pass — [`docs/audit/2026-06-22-audit.md`](docs/audit/2026-06-22-audit.md)
+  (0 reachable bugs; fail-loud precondition guards).
+
+No code change from 0.9.0 — 1.0.0 is the clean cut: the freeze + the consumer that closes the
+last criteria. Toolchain pin: cyrius 6.2.37.
+
 ## [0.9.0] - 2026-06-22
 
 **Optimization + documentation.** Captures the benchmarks (a v1.0 criterion), polishes the
