@@ -1,0 +1,212 @@
+# tarka — verifier-guided tree search (beam) over reasoning steps (0.7.0).
+#
+# The 0.5.0 reasoning demo (parity chain) showed self-consistency + best-of-N — but parity
+# is greedy-optimal, so SEARCH cannot beat greedy there (design review wf_00bc0960). 0.7.0
+# needs a task that genuinely requires search. Here it is: GENERATE A SEQUENCE THE VERIFIER
+# PREFERS BUT THE POLICY DOES NOT FAVOR — a leading streak of a TARGET token that is never
+# the policy's argmax (so greedy never emits it) and has only ~1/V probability per step (so
+# a length-T streak is ~V^-T under sampling — best-of-N is hopeless). A PRM trained to prefer
+# TARGET guides BEAM SEARCH to maintain the streak by PRUNING dead prefixes at every depth.
+# This is constrained/search-based decoding: greedy ≈ 0, best-of-N ≈ 0, beam ≈ full — the
+# value of verifier-guided search. Additive; touches nothing (24 grad-checks byte-identical).
+# Include AFTER reasoning.cyr (uses rm_*, pol_*, rl_*, the parity infra).
+
+fn TARGET(): i64 { return 5; }          # the verifier-preferred token (never par_correct, so never the argmax)
+fn SR_V(): i64 { return 12; }
+fn SR_D(): i64 { return 8; }
+fn SR_T(): i64 { return 16; }
+
+# ---- forward-pass counter (matched-compute budget unit) — wrappers, NOT edits to pol_logits/rm_reward
+var g_fwd = 0;
+fn cnt_logits(x): i64 { g_fwd = g_fwd + 1; pol_logits(x); return 0; }            # 1 policy linear_fwd
+fn cnt_rm(x, a): i64 { g_fwd = g_fwd + 1; return rm_reward(x, a); }              # 1 PRM linear_fwd
+fn cnt_rollout(p): i64 {                                                          # counted rollout (T policy fwds)
+    var x = p; var t = 0;
+    while (t < g_T) {
+        store64(R_states + t*8, x);
+        cnt_logits(x); pol_softmax();
+        var a = pol_sample();
+        store64(R_actions + t*8, a);
+        x = a; t = t + 1;
+    }
+    return 0;
+}
+
+# the TRUE objective: how many of the T steps emitted TARGET — exactly what the verifier
+# (TARGET-PRM) scores, so beam optimizes the metric directly. Greedy (never argmax-TARGET) and
+# best-of-N (uniform sampling) can't make this large; beam STEERS each step toward TARGET.
+fn target_streak(st, ac): i64 {
+    var c = 0; var t = 0;
+    while (t < g_T) { if (load64(ac + t*8) == TARGET()) { c = c + 1; } t = t + 1; }
+    return f64_from(c);
+}
+
+# ---- the verifier: a PRM trained to prefer TARGET over any other action (winner=(x,TARGET),
+# loser=(x, non-TARGET)). Reuses the reward.cyr Bradley-Terry machinery. Frozen during search.
+var TW1 = 0; var TW2 = 0; var TL1 = 0; var TL2 = 0;
+fn target_wrong(x): i64 {
+    var a = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V;
+    while (a == TARGET()) { a = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V; }
+    return a;
+}
+fn rm_train_target(steps, batch, lr): i64 {
+    if (TW1 == 0) { TW1 = t_alloc(1); TW2 = t_alloc(1); TL1 = t_alloc(1); TL2 = t_alloc(1); }
+    var invB = f64_div(f64_from(1), f64_from(batch));
+    var s = 0;
+    while (s < steps) {
+        rm_zero_grads();
+        var bi = 0;
+        while (bi < batch) {
+            var x = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V;
+            store64(TW1, x); store64(TW2, TARGET());            # winner (x, TARGET)
+            store64(TL1, x); store64(TL2, target_wrong(x));     # loser  (x, non-TARGET)
+            rm_backward_pair(TW1, TW2, TL1, TL2, 1);
+            bi = bi + 1;
+        }
+        t_scale(G_Er, g_V*g_D, invB); t_scale(G_Wr, g_D*g_V, invB); t_scale(G_br, g_V, invB);
+        rm_adam_step(lr);
+        s = s + 1;
+    }
+    return 0;
+}
+
+# setup: a FRESH (≈uniform) policy — TARGET is just one of g_V tokens, rarely the argmax — plus
+# the frozen TARGET-preferring PRM verifier. The policy is never trained toward TARGET: the
+# verifier+search must do the work.
+fn search_setup(): i64 {
+    pol_init(SR_V(), SR_D(), SR_T(), TARGET(), 7); rm_init();
+    g_datalen = 0;
+    rm_train_target(300, 16, f64_div(f64_from(5), f64_from(100)));
+    return 0;
+}
+
+# greedy decode: argmax policy each step (1 policy fwd/step, no PRM). Almost never TARGET.
+fn pol_argmax(x): i64 {
+    cnt_logits(x);
+    var best = 0; var bv = load64(S_logits); var v = 1;
+    while (v < g_V) { var lv = load64(S_logits + v*8); if (f64_gt(lv, bv) == 1) { bv = lv; best = v; } v = v + 1; }
+    return best;
+}
+fn srch_greedy(nprompts, base_seed): i64 {
+    rng_seed(base_seed);
+    var prompts = t_alloc(nprompts);
+    var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
+    var total = f64_from(0);
+    i = 0;
+    while (i < nprompts) {
+        var x = load64(prompts + i*8); var t = 0;
+        while (t < g_T) {
+            store64(R_states + t*8, x); var a = pol_argmax(x); store64(R_actions + t*8, a); x = a; t = t + 1;
+        }
+        total = f64_add(total, target_streak(R_states, R_actions));
+        i = i + 1;
+    }
+    return f64_to(f64_mul(f64_div(total, f64_from(nprompts)), f64_from(100)));
+}
+
+# best-of-N: sample N counted rollouts, select the one the VERIFIER scores highest, report its
+# TRUE target-streak. Per sample: T policy + T PRM forwards.
+fn srch_best_of_n(N, nprompts, base_seed): i64 {
+    rng_seed(base_seed);
+    var prompts = t_alloc(nprompts);
+    var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
+    var total = f64_from(0);
+    i = 0;
+    while (i < nprompts) {
+        var p = load64(prompts + i*8); rng_seed(base_seed + 100003 * (i + 1));
+        var bsc = f64_from(0); var btr = f64_from(0); var k = 0;
+        while (k < N) {
+            cnt_rollout(p);
+            var sc = f64_from(0); var t = 0;
+            while (t < g_T) { sc = f64_add(sc, cnt_rm(load64(R_states+t*8), load64(R_actions+t*8))); t = t + 1; }
+            var tr = target_streak(R_states, R_actions);
+            if ((k == 0) || (f64_gt(sc, bsc) == 1)) { bsc = sc; btr = tr; }
+            k = k + 1;
+        }
+        total = f64_add(total, btr);
+        i = i + 1;
+    }
+    return f64_to(f64_mul(f64_div(total, f64_from(nprompts)), f64_from(100)));
+}
+
+# ---- PRM-guided beam search ------------------------------------------------------
+# B beams (prefixes), K children each. Per depth: expand each beam by K sampled actions,
+# score each child by parent-cumulative-PRM + the new edge's rm_reward (incremental — 1 PRM
+# fwd/child), keep top-B. Pruning concentrates the budget on live TARGET-prefixes. Cost:
+# B*T policy + B*K*T PRM forwards (linear). Returns mean TRUE target-streak ×100/T.
+fn BMAX(): i64 { return 16; }
+var BM_st = 0; var BM_ac = 0; var BM_sc = 0;
+var NB_st = 0; var NB_ac = 0; var NB_sc = 0;
+var CH_par = 0; var CH_act = 0; var CH_sc = 0;
+fn search_init(): i64 {
+    BM_st = t_alloc(BMAX() * g_T); BM_ac = t_alloc(BMAX() * g_T); BM_sc = t_alloc(BMAX());
+    NB_st = t_alloc(BMAX() * g_T); NB_ac = t_alloc(BMAX() * g_T); NB_sc = t_alloc(BMAX());
+    CH_par = t_alloc(BMAX() * BMAX()); CH_act = t_alloc(BMAX() * BMAX()); CH_sc = t_alloc(BMAX() * BMAX());
+    return 0;
+}
+fn srch_beam(B, K, nprompts, base_seed): i64 {
+    rng_seed(base_seed);
+    var prompts = t_alloc(nprompts);
+    var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
+    var total = f64_from(0);
+    i = 0;
+    while (i < nprompts) {
+        var p = load64(prompts + i*8); rng_seed(base_seed + 100003 * (i + 1));
+        # init B beams: all seeded at the prompt, score 0
+        var m = 0; while (m < B) { store64(BM_st + (m*g_T)*8, p); store64(BM_sc + m*8, f64_from(0)); m = m + 1; }
+        var d = 0;
+        while (d < g_T) {
+            var nc = 0;
+            m = 0;
+            while (m < B) {
+                var x = load64(BM_st + (m*g_T + d)*8);
+                cnt_logits(x); pol_softmax();                 # one policy fwd per beam per depth
+                var k = 0;
+                while (k < K) {
+                    var a = pol_sample();
+                    var edge = cnt_rm(x, a);                  # 1 incremental PRM fwd per child
+                    store64(CH_par + nc*8, m); store64(CH_act + nc*8, a);
+                    store64(CH_sc + nc*8, f64_add(load64(BM_sc + m*8), edge));
+                    nc = nc + 1; k = k + 1;
+                }
+                m = m + 1;
+            }
+            # select top-B candidates by cumulative score (selection with a used mask)
+            var slot = 0;
+            while (slot < B) {
+                var best = 0 - 1; var bv = f64_from(0); var c = 0;
+                while (c < nc) {
+                    if (load64(CH_par + c*8) >= 0) {
+                        if ((best < 0) || (f64_gt(load64(CH_sc + c*8), bv) == 1)) {
+                            best = c; bv = load64(CH_sc + c*8);
+                        }
+                    }
+                    c = c + 1;
+                }
+                # materialize candidate `best` into NB slot
+                var par = load64(CH_par + best*8); var act = load64(CH_act + best*8);
+                var t2 = 0;
+                while (t2 <= d) { store64(NB_st + (slot*g_T + t2)*8, load64(BM_st + (par*g_T + t2)*8)); t2 = t2 + 1; }
+                t2 = 0;
+                while (t2 < d) { store64(NB_ac + (slot*g_T + t2)*8, load64(BM_ac + (par*g_T + t2)*8)); t2 = t2 + 1; }
+                store64(NB_ac + (slot*g_T + d)*8, act);
+                if (d + 1 < g_T) { store64(NB_st + (slot*g_T + d + 1)*8, act); }   # x_{t+1}=a_t
+                store64(NB_sc + slot*8, load64(CH_sc + best*8));
+                store64(CH_par + best*8, 0 - 1);              # mark consumed
+                slot = slot + 1;
+            }
+            # swap NB -> BM
+            var tmp = BM_st; BM_st = NB_st; NB_st = tmp;
+            tmp = BM_ac; BM_ac = NB_ac; NB_ac = tmp;
+            tmp = BM_sc; BM_sc = NB_sc; NB_sc = tmp;
+            d = d + 1;
+        }
+        # pick the best full beam by verifier score, report its TRUE target-streak
+        var bm = 0; var bsc = load64(BM_sc + 0);
+        m = 1;
+        while (m < B) { if (f64_gt(load64(BM_sc + m*8), bsc) == 1) { bsc = load64(BM_sc + m*8); bm = m; } m = m + 1; }
+        total = f64_add(total, target_streak(BM_st + bm*g_T*8, BM_ac + bm*g_T*8));
+        i = i + 1;
+    }
+    return f64_to(f64_mul(f64_div(total, f64_from(nprompts)), f64_from(100)));
+}

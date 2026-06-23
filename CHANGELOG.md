@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-22
+
+**Reasoning complete — PRM-guided tree (beam) search, where search is genuinely
+necessary.** 0.5.0 showed self-consistency + best-of-N, but parity is greedy-optimal so
+search couldn't beat greedy there. 0.7.0 adds a task that *requires* search and the tree
+search to solve it — closing the verifier-guided-reasoning arc. Design adversarially
+reviewed (workflow vs Tree-of-Thoughts / MCTS-PUCT / process-reward search + budget
+fairness). Additive (`src/search.cyr`) — the 24 grad-checks stay byte-identical (zero new
+backward; pure inference-time search over the frozen policy + frozen PRM verifier).
+
+### Added (`src/search.cyr`)
+- **A genuine-search task**: generate a leading run of a `TARGET` token the policy never
+  prefers (never its argmax, ~1/V per step) — so greedy ≈ 0 and best-of-N needs ~V⁻ᵀ
+  (hopeless), but a PRM trained to prefer TARGET can guide search to it.
+- **PRM-guided beam search** (`srch_beam`, width B, branch K): expand each beam by K
+  sampled actions, score each child by parent-cumulative-PRM + the new edge (incremental,
+  1 PRM forward/child → linear cost), keep top-B. Pruning concentrates the budget on
+  verifier-preferred prefixes — *steering* generation, not just filtering whole samples.
+- **Matched-compute harness** — a forward-pass counter (wrapper functions, not edits to
+  `pol_logits`/`rm_reward`); greedy / best-of-N / beam all measured in total `linear_fwd`.
+
+### Result (at MATCHED compute, 1152 forward passes/prompt; metric = #TARGET of 16)
+- **greedy 0.20 · best-of-N 4.05 · PRM-guided beam 13.50** — beam beats best-of-N **3.3×**
+  and greedy **67×**. Verifier-guided tree search is genuinely necessary: it generates a
+  verifier-preferred sequence that neither greedy decode nor best-of-N sampling can.
+- (MCTS/PUCT was scoped out per the design review — deterministic transitions + one good
+  action per step make beam the right tool here; MCTS is a post-1.0 lever.)
+
 ## [0.6.0] - 2026-06-22
 
 **Refactor — descriptive names replace the `Mx` milestone codes (no behavior change).**

@@ -5,6 +5,16 @@
 
 ## Version
 
+**0.7.0** — 2026-06-22. **Reasoning complete — PRM-guided tree (beam) search where search
+is genuinely necessary.** `src/search.cyr` adds a task that *requires* search (generate a
+leading run of a `TARGET` token the policy never prefers) + PRM-guided beam search to solve
+it. At MATCHED compute (1152 fwd/prompt; metric = #TARGET of 16): **greedy 0.20 · best-of-N
+4.05 · beam 13.50** — beam beats best-of-N 3.3× and greedy 67×. Verifier-guided search
+generates a verifier-preferred sequence neither greedy nor best-of-N can. Design adversarially
+reviewed (ToT/MCTS/budget-fairness). Additive — 24 grad-checks byte-identical. (MCTS scoped
+out: deterministic + one-good-action → beam is the right tool; post-1.0 lever.) **The
+verifier-guided-reasoning arc is closed.**
+
 **0.6.0** — 2026-06-22. **Refactor — descriptive names replace the `Mx` milestone codes**
 (no behavior change; 24/24 grad-checks + all gates unchanged). Files renamed by content
 (`actorcritic.cyr`, `reward.cyr`, `parity.cyr`, `preference.cyr`, `reasoning.cyr`); all
@@ -68,15 +78,16 @@ scaffold.) **M1 closed** at attn11 1.11.1.
   accuracy from orderings only; fresh policy on each frozen reward reaches **PRM 15.54 /
   ORM 13.64 (of 16)** true reward — process supervision wins.
 
-**Verifier-guided reasoning (start) — shipped at 0.5.0:**
+**Verifier-guided reasoning — complete (deliberation 0.5.0, tree search 0.7.0):**
 - `src/reasoning.cyr` — inference-time deliberation on the trained policy + reward-model verifier
   (no extra training). Reasoning task = checkable answer over a parity chain; policy made
   imperfect via partial training (single-sample acc 627/1000). **Self-consistency** scales
   627→797→**930** (N=1→16→64); **verifier best-of-N** selects true reward **892** vs 530
   mean, ~matching oracle **894** (near-perfect PRM verifier). Design adversarially reviewed
   (Wang/Cobbe/Gao). Additive — 24 grad-checks byte-identical.
-- **Remaining (0.7.0 → v1.0):** PRM-guided **tree search / MCTS** on a *sequential* task
-  (parity has no search headroom — outcome-level deliberation only).
+- **Tree search ✅ (0.7.0)**: `src/search.cyr` — PRM-guided **beam search** on a genuine-search
+  task (generate a TARGET token the policy never favors). Matched compute: greedy 0.20 /
+  best-of-N 4.05 / **beam 13.50** of 16 — beam 3.3× best-of-N, 67× greedy. Search is necessary.
 
 ## Tests
 
@@ -112,9 +123,7 @@ is the eventual downstream.)
 
 ## Next (version plan)
 
-- **0.7.0** — the remaining reasoning work: PRM-guided **tree search / MCTS** on a
-  *sequential* task (parity has no search headroom — needs a task where pruning bad
-  prefixes early beats best-of-N).
+- **0.7.0 — ✅ done**: PRM-guided beam search (the reasoning arc is closed).
 - **0.8.0** — security / hardening audit.
 - **0.9.0** — optimization + documentation updates and additions.
 - **1.0.0** — clean cut (the v1.0 release).

@@ -75,7 +75,7 @@ hand-coded scalar reward — the substrate for verifier-guided reasoning.
   transmit; process supervision wins (Lightman 2023). Right RL per reward shape:
   per-step→PPO+GAE, terminal→GRPO (group-norm cancels the BT offset).
 
-### Verifier-guided reasoning (v0.5.0 → v1.0) — 🚧 started 2026-06-22 (0.5.0)
+### Verifier-guided reasoning (v0.5.0–0.7.0) — ✅ complete 2026-06-22
 
 The "thinking" half: multi-step chain-of-thought rollouts, self-consistency
 (sample-and-vote), then verifier-guided search → tree search / MCTS over reasoning
@@ -85,9 +85,11 @@ steps, scored by the learned reward/process models.
   (votes N=1→16→64); **verifier best-of-N** true reward 892 vs 530 mean, ~oracle 894
   (near-perfect PRM verifier). Reasoning task = parity-chain answer; policy made
   imperfect via partial training. Additive (24 grad-checks intact).
-- **Remaining → v1.0**: PRM-guided **tree search / MCTS** on a **sequential** task
-  (parity is per-step-independent → no search headroom; needs a task where pruning bad
-  prefixes early beats best-of-N). That is the path to v1.0.
+- **0.7.0 — tree search ✅** (`src/search.cyr`): a genuine-search task (generate a TARGET
+  token the policy never favors → greedy ≈ 0, best-of-N ≈ V⁻ᵀ) + **PRM-guided beam search**
+  that steers generation to it. Matched compute (1152 fwd/prompt, #TARGET of 16): **greedy
+  0.20 / best-of-N 4.05 / beam 13.50** — beam 3.3× best-of-N, 67× greedy. Search is necessary.
+  (MCTS scoped out: deterministic + one-good-action → beam is the right tool; post-1.0 lever.)
 
 ## Path to v1.0 (version plan)
 
@@ -96,9 +98,8 @@ the remaining versions are about finish quality.
 
 - **0.6.0 — ✅ refactor**: descriptive names replace the `Mx` milestone codes throughout
   the code (no behavior change; 24/24 grad-checks + all gates unchanged).
-- **0.7.0 — sequential reasoning**: PRM-guided **tree search / MCTS** on a task with
-  sequential structure (where pruning bad prefixes early beats best-of-N) — completes the
-  verifier-guided-reasoning milestone.
+- **0.7.0 — ✅ tree search**: PRM-guided beam search on a genuine-search task (greedy 0.20 /
+  best-of-N 4.05 / beam 13.50 of 16 at matched compute). The reasoning arc is closed.
 - **0.8.0 — security / hardening audit** (`docs/audit/`).
 - **0.9.0 — optimization + documentation** updates and additions.
 - **1.0.0 — clean cut**: the v1.0 release (API freeze + the criteria above).
