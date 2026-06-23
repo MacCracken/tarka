@@ -1,6 +1,6 @@
-# tarka — M3 demonstration: a learned process-reward model transmits the task signal.
+# tarka — reward-model demonstration: a learned process-reward model transmits the task signal.
 #
-# The non-circular acceptance test (per the M3 design review): the reward model is
+# The non-circular acceptance test (per the reward-model design review): the reward model is
 # trained ONLY from preference orderings (it never sees the true reward), then a FRESH
 # policy is RL-trained against the FROZEN learned reward, and we measure the policy's
 # TRUE reward. Success = the learned proxy carries enough signal that optimizing it
@@ -73,7 +73,7 @@ fn rm_ppo_step(epochs, lr): i64 {                              # PPO using the l
     while (e < epochs) {
         pol_zero_grads(); val_zero_grads();
         ppo_backward(); critic_backward(VAL_COEF());
-        m2_scale_grads(invT);
+        ac_scale_grads(invT);
         pol_adam_step(lr); critic_adam_step(lr);
         e = e + 1;
     }
@@ -81,7 +81,7 @@ fn rm_ppo_step(epochs, lr): i64 {                              # PPO using the l
 }
 
 # ---- OUTCOME reward model (ORM): preferences over WHOLE rollouts -----------------
-# The other half of M3. r_θ is the same head; ORM trains on rollout-level pairs (the
+# The other half of reward-model. r_θ is the same head; ORM trains on rollout-level pairs (the
 # whole-trajectory winner ≻ loser by true reward) and the RL reward is the single
 # terminal score R(τ)=Σ_t r_θ — a SPARSE signal the critic/GAE must propagate back.
 # Contrast with PRM's DENSE per-step reward (process supervision; Lightman 2023).
@@ -161,7 +161,7 @@ fn rm_orm_ppo_step(epochs, lr): i64 {
     while (e < epochs) {
         pol_zero_grads(); val_zero_grads();
         ppo_backward(); critic_backward(VAL_COEF());
-        m2_scale_grads(invT);
+        ac_scale_grads(invT);
         pol_adam_step(lr); critic_adam_step(lr);
         e = e + 1;
     }

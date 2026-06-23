@@ -5,8 +5,15 @@
 
 ## Version
 
-**0.5.0** — 2026-06-22. **M4 (start) — verifier-guided reasoning.** Inference-time
-deliberation on the trained policy + M3 verifier (no extra training): **self-consistency**
+**0.6.0** — 2026-06-22. **Refactor — descriptive names replace the `Mx` milestone codes**
+(no behavior change; 24/24 grad-checks + all gates unchanged). Files renamed by content
+(`actorcritic.cyr`, `reward.cyr`, `parity.cyr`, `preference.cyr`, `reasoning.cyr`); all
+`m2_*`/`m4_*`/`M4_*` identifiers → `ac_*`/`reason_*`/`REASON_*`/`eff_run`; comments + demo
+output read REINFORCE / actor-critic / reward-model / reasoning. (`rl_*`/`rm_*`/`gae_*`/
+`ppo_*`/`grpo_*`/`par_*` were already descriptive.)
+
+**0.5.0** — 2026-06-22. **Reasoning (start) — verifier-guided deliberation.** Inference-time
+deliberation on the trained policy + reward-model verifier (no extra training): **self-consistency**
 (answer accuracy **627 → 930** over votes N=1→64) and **verifier best-of-N** (PRM reranks
 to true reward **892** vs 530 mean, ~oracle **894**). Design adversarially reviewed
 (Wang/Cobbe/Gao). Additive — 24 grad-checks byte-identical. Opens the v0.5.0→v1.0 arc
@@ -30,7 +37,7 @@ scaffold.) **M1 closed** at attn11 1.11.1.
 
 ## Source
 
-**M1 REINFORCE core — shipped at 0.2.0; akshara wired at 0.2.1:**
+**REINFORCE core — shipped at 0.2.0; akshara wired at 0.2.1:**
 - `src/rl.cyr` — the minimal rosnet-backed policy (embedding + linear head;
   `π(next|cur) = softmax(E[cur]@W + b)`) + on-policy REINFORCE (rollout → reward →
   advantage `(R − EMA baseline)` → advantage-weighted softmax-CE backward) + compact
@@ -41,34 +48,34 @@ scaffold.) **M1 closed** at attn11 1.11.1.
 
 **M1 closed:** attn11 de-featured `--objective rl` at **attn11 1.11.1** (RL lives here).
 
-**M2 — actor-critic / PPO / GRPO — shipped at 0.3.0:**
-- `src/m2.cyr` — value critic `V(s)=w_v·E[s]+b_v` (shared-E, MSE-regressed), **GAE**
+**Actor-critic / PPO / GRPO — shipped at 0.3.0:**
+- `src/actorcritic.cyr` — value critic `V(s)=w_v·E[s]+b_v` (shared-E, MSE-regressed), **GAE**
   (γ=0.99 λ=0.95), **PPO** clipped surrogate (frozen π_old, ratio, clip 0.2, multi-epoch
   via `ppo_train`), **GRPO** (group-relative normalized advantage, no critic, `grpo_train`).
   Math adversarially verified (8-agent design workflow) before code; all on rosnet primitives.
-- `src/bench_m2.cyr` — parity control task + **rollouts-to-threshold** benchmark (median
+- `src/parity.cyr` — parity control task + **rollouts-to-threshold** benchmark (median
   of 5 seeds): **PPO 32, GRPO 160, REINFORCE 192** — PPO/GRPO more sample-efficient (M2
   acceptance gate met).
 - Demos: count task all three learn (REINFORCE 1.00→24.00, PPO 0.81→23.78, GRPO 0.81→24.00).
 
-**M3 — learned reward / process-reward models — complete (core+PRM 0.4.0, ORM 0.4.1):**
-- `src/m3.cyr` — Bradley-Terry reward model `r_θ(s,a)` (own embedding, not softmaxed,
+**Learned reward / process-reward models — complete (core+PRM 0.4.0, ORM 0.4.1):**
+- `src/reward.cyr` — Bradley-Terry reward model `r_θ(s,a)` (own embedding, not softmaxed,
   stable log-sigmoid, RM-own Adam; seed `g_r·onehot(a)`).
-- `src/bench_m3.cyr` — **PRM** (step-level prefs → PPO, dense per-step reward) **and ORM**
+- `src/preference.cyr` — **PRM** (step-level prefs → PPO, dense per-step reward) **and ORM**
   (whole-rollout prefs → GRPO, terminal reward; GRPO normalization cancels the BT offset
   the sparse-PPO path couldn't handle).
 - Acceptance (non-circular + process-vs-outcome): both RMs **100%** held-out preference
   accuracy from orderings only; fresh policy on each frozen reward reaches **PRM 15.54 /
   ORM 13.64 (of 16)** true reward — process supervision wins.
 
-**M4 — verifier-guided reasoning (start) — shipped at 0.5.0:**
-- `src/bench_m4.cyr` — inference-time deliberation on the trained policy + M3 verifier
+**Verifier-guided reasoning (start) — shipped at 0.5.0:**
+- `src/reasoning.cyr` — inference-time deliberation on the trained policy + reward-model verifier
   (no extra training). Reasoning task = checkable answer over a parity chain; policy made
   imperfect via partial training (single-sample acc 627/1000). **Self-consistency** scales
   627→797→**930** (N=1→16→64); **verifier best-of-N** selects true reward **892** vs 530
   mean, ~matching oracle **894** (near-perfect PRM verifier). Design adversarially reviewed
   (Wang/Cobbe/Gao). Additive — 24 grad-checks byte-identical.
-- **Remaining for M4 → v1.0:** PRM-guided **tree search / MCTS** on a *sequential* task
+- **Remaining (0.7.0 → v1.0):** PRM-guided **tree search / MCTS** on a *sequential* task
   (parity has no search headroom — outcome-level deliberation only).
 
 ## Tests
@@ -103,7 +110,13 @@ Direct (declared in `cyrius.cyml`):
 _None yet._ (Long-horizon: a sovereign agent/reasoning runtime — daimon-adjacent —
 is the eventual downstream.)
 
-## Next
+## Next (version plan)
 
-M1 — migrate attn11's `--objective rl` (REINFORCE) here, re-expressed on rosnet.
+- **0.7.0** — the remaining reasoning work: PRM-guided **tree search / MCTS** on a
+  *sequential* task (parity has no search headroom — needs a task where pruning bad
+  prefixes early beats best-of-N).
+- **0.8.0** — security / hardening audit.
+- **0.9.0** — optimization + documentation updates and additions.
+- **1.0.0** — clean cut (the v1.0 release).
+
 See [`roadmap.md`](roadmap.md).

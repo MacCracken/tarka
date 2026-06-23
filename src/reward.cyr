@@ -1,8 +1,8 @@
-# tarka — M3: learned reward & process-reward models (Bradley-Terry preferences).
+# tarka — reward-model: learned reward & process-reward models (Bradley-Terry preferences).
 #
-# Replaces the hand-coded scalar reward (M1/M2 count/parity) with a LEARNED reward
+# Replaces the hand-coded scalar reward (REINFORCE/actor-critic count/parity) with a LEARNED reward
 # model r_θ(s,a), trained from PREFERENCES (Christiano 2017 / Ouyang 2022 RLHF;
-# Lightman 2023 process supervision). The M2 PPO/GRPO then optimizes the FROZEN
+# Lightman 2023 process supervision). The actor-critic PPO/GRPO then optimizes the FROZEN
 # learned reward. The RM is a self-contained scalar head over its OWN params
 # (E_r V×D, W_r D×V, b_r V) — NOT softmaxed: r_θ(s,a) = (E_r[s]·W_r + b_r)[a], the
 # a-th raw logit. Two flavors share the head:

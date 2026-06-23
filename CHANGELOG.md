@@ -4,6 +4,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-22
+
+**Refactor — descriptive names replace the `Mx` milestone codes (no behavior change).**
+The internal `M1/M2/M3/M4` milestone labels were never real identifiers; every file,
+function, and constant now carries a meaningful name. Byte-for-byte behavior preserved —
+24/24 grad-checks unchanged, all demo gates pass.
+
+### Changed
+- **Files** renamed by what they contain:
+  `m2.cyr → actorcritic.cyr` (value critic, GAE, PPO, GRPO),
+  `m3.cyr → reward.cyr` (Bradley-Terry reward model),
+  `bench_m2.cyr → parity.cyr` (the parity task + per-method RL steps + sample-efficiency
+  benchmark), `bench_m3.cyr → preference.cyr` (preference-trained reward + ORM/PRM demo),
+  `bench_m4.cyr → reasoning.cyr` (verifier-guided reasoning).
+- **Identifiers**: `m2_init → ac_init`, `m2_scale_grads → ac_scale_grads`,
+  `m2_bench_run → eff_run`; `m4_setup → reason_setup`, `m4_answer → reason_answer`,
+  `m4_oracle → reason_oracle`, `m4_sc_answer → reason_self_consistency`,
+  `m4_bon_reward → reason_best_of_n`, `m4_method_acc → reason_accuracy`,
+  `m4_corr_gate → reason_verifier_gate`; the `M4_*` task constants → `REASON_*`; the demo
+  gate flags `m{2,3,4}_ok → {ac,reward,reason}_ok`. (`rl_*`, `rm_*`, `gae_*`, `ppo_*`,
+  `grpo_*`, `critic_*`, `par_*` were already descriptive — untouched.)
+- **Comments + demo output**: the `M1/M2/M3/M4` labels read REINFORCE / actor-critic /
+  reward-model / reasoning. Versioned-release history in this CHANGELOG is left as-is.
+
 ## [0.5.0] - 2026-06-22
 
 **M4 (start) — verifier-guided reasoning, the "thinking" half.** The trained policy + the

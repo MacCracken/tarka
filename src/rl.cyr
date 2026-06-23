@@ -1,4 +1,4 @@
-# tarka — minimal REINFORCE on a rosnet-backed policy (M1).
+# tarka — minimal REINFORCE on a rosnet-backed policy (REINFORCE).
 #
 # A deliberately minimal autoregressive softmax policy: token embedding E(V×D) +
 # linear head W(D×V), b(V), so  pi(next | cur) = softmax(E[cur] @ W + b)  — a

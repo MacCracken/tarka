@@ -15,13 +15,13 @@
 
 ## Milestones
 
-### M0 — Scaffold (v0.1.0) — ✅ shipped 2026-06-22
+### Scaffold (v0.1.0) — ✅ shipped 2026-06-22
 
 - `cyrius init` scaffold landed; identity + attn11 boundary documented.
 - Deps wired: rosnet 0.2.0 (CPU) + tyche 0.1.1.
 - [ADR 0001](../adr/0001-tarka-scope-and-rl-migration.md) — scope + migration boundary.
 
-### M1 — REINFORCE migration (v0.2.0) — core shipped 2026-06-22
+### REINFORCE migration (v0.2.0) — core shipped 2026-06-22
 
 Bring attn11's `--objective rl` home and **re-express it on rosnet** (not a literal
 copy of attn11's in-model seeding). On-policy REINFORCE: sample rollouts from the
@@ -45,42 +45,42 @@ the advantage `(R − b)` with an EMA baseline `b`.
 - **Remaining to close M1**: **attn11 side** (separate, user-confirmed): remove
   `--objective rl` + RL surface; attn11 reverts to a pure SFT/diffusion reference.
 
-### M2 — GRPO / PPO + value critic (v0.3.0) — ✅ shipped 2026-06-22
+### GRPO / PPO + value critic (v0.3.0) — ✅ shipped 2026-06-22
 
 The documented attn11 follow-on, now tarka's. Add a value head (critic), GAE
 advantage estimation, and a clipped surrogate (PPO) / group-relative (GRPO) objective.
 
 - **Acceptance**: critic + GAE + clipped objective grad-checked; a control task where
   PPO/GRPO measurably beats bare REINFORCE on sample efficiency.
-- **Core ✅ (in-flight)**: `src/m2.cyr` — critic + GAE + PPO + GRPO, math adversarially
+- **Core ✅ (in-flight)**: `src/actorcritic.cyr` — critic + GAE + PPO + GRPO, math adversarially
   verified (8-agent design workflow vs Schulman/DeepSeek) then **grad-checked: +15 checks,
   19/19 green** (critic FD-exact; GAE recursion==explicit; PPO ρ=1==REINFORCE + clip→0;
   GRPO group-norm + ratio=1==REINFORCE). Demo: all three learn (PPO 0.81→23.78, GRPO →24.00).
 - **Acceptance ✅**: parity control task + **rollouts-to-threshold** benchmark
-  (`src/bench_m2.cyr`, median of 5 seeds): **PPO 32, GRPO 160, REINFORCE 192** — PPO/GRPO
+  (`src/parity.cyr`, median of 5 seeds): **PPO 32, GRPO 160, REINFORCE 192** — PPO/GRPO
   measurably more sample-efficient. Cut at **0.3.0**.
 
-### M3 — Reward & process-reward models (v0.4.0–0.4.1) — ✅ complete 2026-06-22
+### Reward & process-reward models (v0.4.0–0.4.1) — ✅ complete 2026-06-22
 
 Learned reward models (outcome) and process-reward models (per-step), replacing the
 hand-coded scalar reward — the substrate for verifier-guided reasoning.
-- **Shipped**: `src/m3.cyr` — Bradley-Terry reward model `r_θ(s,a)` (own embedding,
+- **Shipped**: `src/reward.cyr` — Bradley-Terry reward model `r_θ(s,a)` (own embedding,
   stable log-sigmoid), grad-checked (**24/24**, +5 incl. the BT descent-direction
   falsifier), design-reviewed vs Christiano/Ouyang/Lightman.
 - **Acceptance (non-circular)**: RM held-out preference accuracy **100%** from orderings
   alone; a fresh policy RL'd on only the frozen learned reward reaches **15.52/16 true
-  reward** (`src/bench_m3.cyr`). Cut at **0.4.0**.
+  reward** (`src/preference.cyr`). Cut at **0.4.0**.
 - **0.4.1 — completed with the outcome RM (ORM)** + process-vs-outcome comparison: ORM
   (whole-rollout prefs → GRPO) **13.64/16** vs PRM (step-level → PPO) **15.54/16** — both
   transmit; process supervision wins (Lightman 2023). Right RL per reward shape:
   per-step→PPO+GAE, terminal→GRPO (group-norm cancels the BT offset).
 
-### M4 — Verifier-guided reasoning (v0.5.0 → v1.0) — 🚧 started 2026-06-22 (0.5.0)
+### Verifier-guided reasoning (v0.5.0 → v1.0) — 🚧 started 2026-06-22 (0.5.0)
 
 The "thinking" half: multi-step chain-of-thought rollouts, self-consistency
 (sample-and-vote), then verifier-guided search → tree search / MCTS over reasoning
-steps, scored by the M3 reward/process models.
-- **0.5.0 (start) — outcome-level deliberation** (`src/bench_m4.cyr`), adversarially
+steps, scored by the learned reward/process models.
+- **0.5.0 (start) — outcome-level deliberation** (`src/reasoning.cyr`), adversarially
   design-reviewed (Wang/Cobbe/Gao): **self-consistency** answer accuracy 627→797→930
   (votes N=1→16→64); **verifier best-of-N** true reward 892 vs 530 mean, ~oracle 894
   (near-perfect PRM verifier). Reasoning task = parity-chain answer; policy made
@@ -88,6 +88,20 @@ steps, scored by the M3 reward/process models.
 - **Remaining → v1.0**: PRM-guided **tree search / MCTS** on a **sequential** task
   (parity is per-step-independent → no search headroom; needs a task where pruning bad
   prefixes early beats best-of-N). That is the path to v1.0.
+
+## Path to v1.0 (version plan)
+
+The feature arc above (REINFORCE → actor-critic → reward models → reasoning) is built;
+the remaining versions are about finish quality.
+
+- **0.6.0 — ✅ refactor**: descriptive names replace the `Mx` milestone codes throughout
+  the code (no behavior change; 24/24 grad-checks + all gates unchanged).
+- **0.7.0 — sequential reasoning**: PRM-guided **tree search / MCTS** on a task with
+  sequential structure (where pruning bad prefixes early beats best-of-N) — completes the
+  verifier-guided-reasoning milestone.
+- **0.8.0 — security / hardening audit** (`docs/audit/`).
+- **0.9.0 — optimization + documentation** updates and additions.
+- **1.0.0 — clean cut**: the v1.0 release (API freeze + the criteria above).
 
 ## Out of scope (for v1.0)
 

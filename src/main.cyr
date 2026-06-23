@@ -1,4 +1,4 @@
-# tarka — REINFORCE demo (M1): a minimal rosnet-backed policy learns, by on-policy
+# tarka — REINFORCE demo (REINFORCE): a minimal rosnet-backed policy learns, by on-policy
 # REINFORCE, to raise a target token's frequency in its own rollouts (the
 # demonstrable RL gate, mirroring attn11's X024). The policy + loop live in
 # src/rl.cyr; this is the driver.
@@ -7,11 +7,11 @@ include "lib/tyche.cyr"    # rng_seed / rng_uniform / rng_u64 / rng_normal
 include "lib/rosnet.cyr"   # linear_fwd / linear_bwd / t_*  (t_randn -> tyche)
 include "lib/akshara.cyr"  # corpus_set / gd_ld / g_char2id / g_datalen  (the tokenizer)
 include "src/rl.cyr"       # the policy + REINFORCE (rl_prompt draws from the corpus)
-include "src/m2.cyr"       # M2: actor-critic, GAE, PPO, GRPO
-include "src/bench_m2.cyr"  # M2 sample-efficiency benchmark (parity task)
-include "src/m3.cyr"        # M3: learned reward & process-reward models (Bradley-Terry)
-include "src/bench_m3.cyr"  # M3 transmission demo (learned reward -> RL -> true reward)
-include "src/bench_m4.cyr"  # M4 verifier-guided reasoning (self-consistency, best-of-N)
+include "src/actorcritic.cyr"       # actor-critic: value critic, GAE, PPO, GRPO
+include "src/parity.cyr"  # actor-critic sample-efficiency benchmark (parity task)
+include "src/reward.cyr"        # reward-model: learned reward & process-reward models (Bradley-Terry)
+include "src/preference.cyr"  # reward-model transmission demo (learned reward -> RL -> true reward)
+include "src/reasoning.cyr"  # verifier-guided reasoning (self-consistency, best-of-N)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -64,15 +64,15 @@ fn main(): i64 {
     var r1 = rl_eval(200);
     puts("  reward after:  "); print_f2(r1); _putc(10);
 
-    # ---- M2: actor-critic PPO + GRPO learn the same task ----
-    puts("\n--- M2: actor-critic PPO + group-relative GRPO (same corpus task) ---\n");
-    pol_init(V, D, T, target, 2024); m2_init();
+    # ---- actor-critic: PPO + GRPO learn the same task ----
+    puts("\n--- actor-critic: PPO + group-relative GRPO (same corpus task) ---\n");
+    pol_init(V, D, T, target, 2024); ac_init();
     var p0 = rl_eval(200);
     ppo_train(250, 4, f64_div(f64_from(5), f64_from(100)), 0);   # 250 steps × 4 epochs, lr 0.05
     var p1 = rl_eval(200);
     puts("  PPO  (critic+GAE, clip 0.2, 4 epochs): "); print_f2(p0); puts(" -> "); print_f2(p1); _putc(10);
 
-    pol_init(V, D, T, target, 2024); m2_init();
+    pol_init(V, D, T, target, 2024); ac_init();
     var q0 = rl_eval(200);
     grpo_train(250, 8, f64_div(f64_from(5), f64_from(100)), 0);  # 250 steps, group 8, lr 0.05
     var q1 = rl_eval(200);
@@ -84,8 +84,8 @@ fn main(): i64 {
     if (f64_gt(q1, f64_mul(q0, f64_from(2))) == 0) { learn_ok = 0; }
     if (learn_ok == 1) { puts("  (all three learn the count task)\n"); }
 
-    # ---- M2 acceptance: sample-efficiency on the parity task ----
-    puts("\n--- M2 acceptance: rollouts-to-threshold on the parity task (median of 5 seeds) ---\n");
+    # ---- actor-critic acceptance: sample-efficiency on the parity task ----
+    puts("\n--- actor-critic acceptance: rollouts-to-threshold on the parity task (median of 5 seeds) ---\n");
     var lr = f64_div(f64_from(5), f64_from(100));         # 0.05
     var rfRoll = bench_median(0, 8, lr);                  # REINFORCE, batch 8
     var ppRoll = bench_median(1, 4, lr);                  # PPO, 4 epochs
@@ -94,27 +94,27 @@ fn main(): i64 {
     puts("  PPO:       "); fmt_int(ppRoll); puts(" rollouts"); _putc(10);
     puts("  GRPO:      "); fmt_int(grRoll); puts(" rollouts"); _putc(10);
 
-    var m2_ok = 0;
+    var ac_ok = 0;
     if ((learn_ok == 1) && (ppRoll < rfRoll) && (grRoll < rfRoll)) {
-        m2_ok = 1; puts("\n  M2 GATE PASS: PPO and GRPO are more sample-efficient than REINFORCE\n");
-    } else { puts("\n  M2 GATE FAIL\n"); }
+        ac_ok = 1; puts("\n  actor-critic GATE PASS: PPO and GRPO are more sample-efficient than REINFORCE\n");
+    } else { puts("\n  actor-critic GATE FAIL\n"); }
 
-    # ---- M3: learned reward models — process (PRM) vs outcome (ORM) supervision ----
+    # ---- reward-model: learned reward models — process (PRM) vs outcome (ORM) supervision ----
     # Each reward model is trained ONLY from preference orderings (never the true reward);
     # then a FRESH policy is RL-trained on the FROZEN learned reward and we measure its
     # TRUE reward. PRM gives a DENSE per-step reward (process supervision); ORM gives a
     # SPARSE terminal reward (outcome). Same RL budget — process supervision should reach
     # higher true reward (Lightman 2023).
-    puts("\n--- M3: learned reward models (Bradley-Terry; reward model never sees the true reward) ---\n");
+    puts("\n--- reward-model: learned reward models (Bradley-Terry; reward model never sees the true reward) ---\n");
     var rmlr = f64_div(f64_from(5), f64_from(100));
     var transmit = f64_from(5);                                      # transmission floor (≈4x random 1.33)
 
     # ORM (outcome): rollout-level preferences -> sparse terminal RL reward
-    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 31337); m2_init(); rm_init();
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 31337); ac_init(); rm_init();
     g_decoy = BENCH_DECOY(); g_datalen = 0;
     rm_train_orm(400, 16, rmlr);
     var oacc = rm_orm_accuracy(300);
-    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 999); m2_init();
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 999); ac_init();
     g_decoy = BENCH_DECOY(); g_datalen = 0;
     var ost = 0; while (ost < 25) { rm_orm_grpo_step(8, rmlr); ost = ost + 1; }   # GRPO, ~200 rollouts
     var orm_true = par_eval(200);
@@ -122,50 +122,50 @@ fn main(): i64 {
     print_f2(orm_true); puts(" / "); fmt_int(BENCH_T()); _putc(10);
 
     # PRM (process): step-level preferences -> dense per-step RL reward
-    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 31337); m2_init(); rm_init();
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 31337); ac_init(); rm_init();
     g_decoy = BENCH_DECOY(); g_datalen = 0;
     rm_train_prm(400, 16, rmlr);
     var pacc = rm_prm_accuracy(500) / 5;                             # -> percent
-    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 999); m2_init();
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 999); ac_init();
     g_decoy = BENCH_DECOY(); g_datalen = 0;
     var pst = 0; while (pst < 200) { rm_ppo_step(4, rmlr); pst = pst + 1; }
     var prm_true = par_eval(200);
     puts("  PRM (process, dense per-step):  held-out acc "); fmt_int(pacc); puts("%, policy TRUE reward ");
     print_f2(prm_true); puts(" / "); fmt_int(BENCH_T()); _putc(10);
 
-    # M3 gate: both learned rewards TRANSMIT (acc>80% + policy true reward > floor); and
+    # reward-model gate: both learned rewards TRANSMIT (acc>80% + policy true reward > floor); and
     # process supervision (PRM) reaches at least the outcome (ORM) true reward at equal budget.
-    var m3_ok = 0;
+    var reward_ok = 0;
     if ((oacc > 80) && (pacc > 80) && (f64_gt(orm_true, transmit) == 1) && (f64_gt(prm_true, transmit) == 1)
         && (f64_lt(orm_true, prm_true) == 1)) {
-        m3_ok = 1;
-        puts("  M3 GATE PASS: both learned rewards transmit; PRM (process) >= ORM (outcome) at equal budget\n");
-    } else { puts("  M3 GATE FAIL\n"); }
+        reward_ok = 1;
+        puts("  reward-model GATE PASS: both learned rewards transmit; PRM (process) >= ORM (outcome) at equal budget\n");
+    } else { puts("  reward-model GATE FAIL\n"); }
 
-    # ---- M4: verifier-guided reasoning — deliberation at inference beats single-sample ----
-    puts("\n--- M4: verifier-guided reasoning (deliberation at inference, no extra training) ---\n");
-    m4_setup();                                                  # partial (imperfect) policy + frozen PRM verifier
-    var corr = m4_corr_gate(400);
-    var m4single = m4_method_acc(0, 1, 400, 2000);
-    var sc16 = m4_method_acc(1, 16, 400, 2000);
-    var sc64 = m4_method_acc(1, 64, 400, 2000);
+    # ---- reasoning: verifier-guided reasoning — deliberation at inference beats single-sample ----
+    puts("\n--- reasoning: verifier-guided reasoning (deliberation at inference, no extra training) ---\n");
+    reason_setup();                                                  # partial (imperfect) policy + frozen PRM verifier
+    var corr = reason_verifier_gate(400);
+    var m4single = reason_accuracy(0, 1, 400, 2000);
+    var sc16 = reason_accuracy(1, 16, 400, 2000);
+    var sc64 = reason_accuracy(1, 64, 400, 2000);
     puts("  self-consistency (answer acc /1000, random 500): single="); fmt_int(m4single);
     puts(" -> vote@16="); fmt_int(sc16); puts(" -> vote@64="); fmt_int(sc64); _putc(10);
-    var bmean = m4_bon_reward(0, 16, 400, 2000);
-    var bver  = m4_bon_reward(1, 16, 400, 2000);
-    var borac = m4_bon_reward(2, 16, 400, 2000);
+    var bmean = reason_best_of_n(0, 16, 400, 2000);
+    var bver  = reason_best_of_n(1, 16, 400, 2000);
+    var borac = reason_best_of_n(2, 16, 400, 2000);
     puts("  best-of-16 true reward (x100/16): mean-sample="); fmt_int(bmean);
     puts("  PRM-verifier-selected="); fmt_int(bver); puts("  oracle="); fmt_int(borac); _putc(10);
 
-    # M4 gate: the PRM verifier is useful (corr); self-consistency scales decisively above
+    # reasoning gate: the PRM verifier is useful (corr); self-consistency scales decisively above
     # single-sample; and verifier best-of-N reranks far above the mean sample, ~matching the oracle.
-    var m4_ok = 0;
+    var reason_ok = 0;
     if ((corr == 1) && (sc64 > m4single + 100) && (sc16 > m4single) && (bver > bmean + 100)) {
-        m4_ok = 1;
-        puts("  M4 GATE PASS: deliberation beats single-sample (SC scales; verifier best-of-N ~ oracle)\n");
-    } else { puts("  M4 GATE FAIL\n"); }
+        reason_ok = 1;
+        puts("  reasoning GATE PASS: deliberation beats single-sample (SC scales; verifier best-of-N ~ oracle)\n");
+    } else { puts("  reasoning GATE FAIL\n"); }
 
-    if ((m2_ok == 1) && (m3_ok == 1) && (m4_ok == 1)) { puts("\n  ALL GATES PASS\n"); return 0; }
+    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1)) { puts("\n  ALL GATES PASS\n"); return 0; }
     puts("\n  GATE FAIL\n");
     return 1;
 }

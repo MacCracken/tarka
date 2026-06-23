@@ -1,4 +1,4 @@
-# tarka — M2: actor-critic, GAE, PPO, GRPO (additive to the M1 REINFORCE in rl.cyr).
+# tarka — actor-critic: value critic, GAE, PPO, GRPO (additive to the REINFORCE in rl.cyr).
 #
 # Builds on the same minimal softmax-bigram policy. Adds:
 #   - a scalar VALUE CRITIC  V(s) = w_v·E[s] + b_v  sharing the policy embedding E
@@ -11,7 +11,7 @@
 #
 # Every backward is expressed in rl.cyr's convention: seed dlogits=(probs-onehot(a))·X
 # over S_probs, then linear_bwd + scatter into G_E; gradient DESCENT. The PPO/GRPO
-# seed reduces EXACTLY to M1's A·(probs-onehot) at importance-ratio 1 (the grad-check
+# seed reduces EXACTLY to REINFORCE's A·(probs-onehot) at importance-ratio 1 (the grad-check
 # anchor). Math adversarially verified (workflow wf_aa0eefde) against Schulman/DeepSeek.
 #
 # Include AFTER rl.cyr (uses g_V/g_D/g_T, P_E/P_W/P_b, pol_logits/pol_softmax, S_probs,
@@ -49,7 +49,7 @@ var GR_oldlp = 0;   # GMAX*T  ln pi_old(a|s) snapshot per group rollout
 var GR_R = 0;       # GMAX    terminal reward per rollout
 var GR_adv = 0;     # GMAX    group-relative advantage per rollout
 
-fn m2_init(): i64 {
+fn ac_init(): i64 {
     P_wv = t_alloc(g_D); P_bv = t_alloc(1);
     G_wv = t_alloc(g_D); G_bv = t_alloc(1);
     M_wv = t_alloc(g_D); V_wv = t_alloc(g_D);
@@ -193,7 +193,7 @@ fn ppo_scale(rho, A, eps): i64 {
 
 # PPO backward over the frozen rollout. Per step: rho = exp(ln pi_new - R_logpold);
 # X = ppo_scale(rho, R_adv[t], eps); seed dlogits=(probs-onehot)*X; linear_bwd + scatter.
-# At rho=1 (fresh snapshot) X = R_adv[t] -> EXACTLY M1's per-step advantage-REINFORCE seed.
+# At rho=1 (fresh snapshot) X = R_adv[t] -> EXACTLY REINFORCE's per-step advantage-REINFORCE seed.
 fn ppo_backward(): i64 {
     var t = 0;
     while (t < g_T) {
@@ -280,7 +280,7 @@ fn grpo_backward(G, invN): i64 {
 
 # ---- training loops ---------------------------------------------------------
 # scale every policy + critic grad block by `s` (mean over the update minibatch).
-fn m2_scale_grads(s): i64 {
+fn ac_scale_grads(s): i64 {
     t_scale(G_W, g_D * g_V, s); t_scale(G_b, g_V, s); t_scale(G_E, g_V * g_D, s);
     t_scale(G_wv, g_D, s); t_scale(G_bv, 1, s);
     return 0;
@@ -304,7 +304,7 @@ fn ppo_train(steps, epochs, lr, log_every): i64 {
             pol_zero_grads(); val_zero_grads();
             ppo_backward();                                   # clipped policy surrogate
             critic_backward(VAL_COEF());                      # value MSE (weight 0.5)
-            m2_scale_grads(invT);                             # mean over the T steps
+            ac_scale_grads(invT);                             # mean over the T steps
             pol_adam_step(lr);                                # advances g_b1t/g_b2t once
             critic_adam_step(lr);                             # critic blocks, same step's bias-corr
             e = e + 1;
