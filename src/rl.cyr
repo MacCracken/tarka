@@ -119,9 +119,14 @@ fn pol_sample(): i64 {
     return g_V - 1;
 }
 
-# a rollout start state: a uniform random token (synthetic corpus). akshara wiring
-# (draw from a real tokenized corpus) is the next sub-bite.
-fn rl_prompt(): i64 { return (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V; }
+# a rollout start state. When a corpus is loaded via akshara (g_datalen > 0), draw a
+# real token from it (gd_ld at a random index) — diverse on-policy contexts grounded
+# in actual text, exactly attn11's rl_prompt. Otherwise fall back to a uniform random
+# token over the synthetic vocab (used by the grad-check tests, which load no corpus).
+fn rl_prompt(): i64 {
+    if (g_datalen > 0) { return gd_ld((rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_datalen); }
+    return (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V;
+}
 
 # sample an on-policy rollout of g_T actions; lay out (state_t, action_t) pairs.
 # x_0 = prompt; x_{t+1} sampled from pi(.|x_t) at temp 1 (on-policy: the sampling

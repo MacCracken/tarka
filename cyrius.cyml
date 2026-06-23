@@ -36,3 +36,15 @@ modules = ["dist/tyche.cyr"]
 git = "https://github.com/MacCracken/rosnet"
 tag = "0.2.0"
 modules = ["dist/rosnet.cyr"]
+
+# Sovereign tokenizer (byte vocab + BPE + packed token store) — the text→token-id
+# layer, the third attn11 extraction (with rosnet/tyche). tarka draws rollout
+# prompts from a real tokenized corpus via `corpus_set` + `gd_ld` instead of a
+# synthetic vocab. The bundle leaves the loader/streaming/emit consumer symbols
+# (`secure_read_file`/`read_stdin`/`file_seek`; `_putc`) unresolved — tarka uses
+# only the pure path (corpus_set/gd_ld), so those stay unreached. `t_alloc`/`t_zero`
+# come from [deps.rosnet] above. One tokenizer, shared with attn11.
+[deps.akshara]
+git = "https://github.com/MacCracken/akshara"
+tag = "0.1.0"
+modules = ["dist/akshara.cyr"]

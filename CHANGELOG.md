@@ -5,9 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Remaining in M1 (toward closing the milestone)
-- Wire **`[deps.akshara]`** — draw rollout prompts from a real tokenized corpus
-  (replaces the synthetic `rng % V` vocab).
 - De-feature attn11's `--objective rl` (its own cut — REINFORCE now lives here).
+
+## [0.2.1] - 2026-06-22
+
+**akshara wired — tarka consumes the shared tokenizer.** Rollout prompts now come
+from a real tokenized corpus instead of a synthetic vocab; "tarka consumes akshara"
+(one tokenizer, two consumers with attn11) is real.
+
+### Added
+- **`[deps.akshara]` 0.1.0** (git+tag) — the sovereign tokenizer. tarka uses the
+  pure path (`corpus_set` builds the byte vocab + packed store; `gd_ld` indexes it);
+  the loader/streaming/emit consumer symbols stay unreached (stubbed for a clean build).
+- **Corpus-grounded `rl_prompt`** (`src/rl.cyr`): when a corpus is loaded
+  (`g_datalen > 0`) prompts are drawn from real tokens via `gd_ld` (attn11's
+  rl_prompt); the synthetic-vocab fallback remains for the grad-check tests.
+- **Demo** (`src/main.cyr`): tokenizes a 45-byte corpus (vocab 28), rewards the
+  space token (id 3); REINFORCE drives its rollout frequency **1.00 → 24.00 / 24**.
+
+### Unchanged
+- Grad-checks **4/4 green** (akshara wired); warning-free build; bench/fuzz compile.
 
 ## [0.2.0] - 2026-06-22
 

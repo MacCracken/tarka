@@ -5,10 +5,18 @@
 
 include "lib/tyche.cyr"    # rng_seed / rng_uniform / rng_u64 / rng_normal
 include "lib/rosnet.cyr"   # linear_fwd / linear_bwd / t_*  (t_randn -> tyche)
-include "src/rl.cyr"       # the policy + REINFORCE
+include "lib/akshara.cyr"  # corpus_set / gd_ld / g_char2id / g_datalen  (the tokenizer)
+include "src/rl.cyr"       # the policy + REINFORCE (rl_prompt draws from the corpus)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+
+# akshara's loader/streaming paths (corpus_load_file/stdin, stream_tok) are unused
+# by tarka — we drive the pure tokenizer path (corpus_set/gd_ld) only — so these
+# consumer symbols stay unreached; stub them so the build is warning-free.
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
 
 # print an f64 with 2 decimals
 fn print_f2(val): i64 {
@@ -30,11 +38,17 @@ fn print_f2(val): i64 {
 
 fn main(): i64 {
     alloc_init();
-    var V = 16; var D = 8; var T = 24; var target = 7;
+    # real tokenized corpus via akshara (byte-level vocab over a short text)
+    var corpus = "the quick brown fox jumps over the lazy dog. ";
+    var clen = 0; while (load8(corpus + clen) != 0) { clen = clen + 1; }
+    var V = corpus_set(corpus, clen);            # byte vocab + packed token store; returns V
+    var D = 8; var T = 24;
+    var target = load64(g_char2id + 32 * 8);     # reward target = token id of ' ' (space)
     pol_init(V, D, T, target, 1337);
-    puts("tarka REINFORCE demo: minimal neural-bigram policy on rosnet\n");
-    puts("  V="); fmt_int(V); puts(" D="); fmt_int(D); puts(" T="); fmt_int(T);
-    puts(" target="); fmt_int(target); _putc(10);
+    puts("tarka REINFORCE demo: minimal neural-bigram policy on rosnet + akshara\n");
+    puts("  corpus="); fmt_int(clen); puts(" bytes, vocab="); fmt_int(V);
+    puts(", D="); fmt_int(D); puts(", T="); fmt_int(T);
+    puts(", target=id "); fmt_int(target); puts(" (space)"); _putc(10);
 
     var r0 = rl_eval(200);
     puts("  reward before (mean target-count out of "); fmt_int(T); puts("): ");

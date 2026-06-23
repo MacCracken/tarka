@@ -5,10 +5,15 @@
 
 include "lib/tyche.cyr"
 include "lib/rosnet.cyr"
+include "lib/akshara.cyr"
 include "src/rl.cyr"
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+# akshara consumer symbols unused on the pure tokenizer path — stub for a clean build
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
 fn EPS(): i64 { return f64_div(f64_from(1), f64_from(10000)); }              # 1e-4
 fn TOL(): i64 { return f64_div(f64_from(1), f64_from(100000)); }            # 1e-5
 fn TOL_EXACT(): i64 { return f64_div(f64_from(1), f64_from(1000000000)); }  # 1e-9

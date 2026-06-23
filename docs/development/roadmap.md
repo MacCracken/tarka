@@ -39,8 +39,10 @@ the advantage `(R − b)` with an EMA baseline `b`.
   Adam landed. Demo: rollout target frequency **1.56 → 24.00 / 24** under REINFORCE.
   Grad-checks **4/4 green** (policy dW/dE/db FD-verified, maxrel ≤ 2e-9; RL
   advantage-scaling `grad(A) == A·grad(1)` exact). Uses a synthetic vocab for now.
-- **Remaining**: (a) wire `[deps.akshara]` so rollout prompts come from a real
-  tokenized corpus; (b) **attn11 side** (separate, user-confirmed): remove
+- **akshara wired ✅ (0.2.1)**: `[deps.akshara]` 0.1.0; `rl_prompt` draws from a real
+  akshara-tokenized corpus (`corpus_set` + `gd_ld`). Demo: 45 B → vocab 28, space
+  token reward, freq 1.00 → 24.00. Grad-checks 4/4 green, warning-free build.
+- **Remaining to close M1**: **attn11 side** (separate, user-confirmed): remove
   `--objective rl` + RL surface; attn11 reverts to a pure SFT/diffusion reference.
 
 ### M2 — GRPO / PPO + value critic (v0.3.0)
