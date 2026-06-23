@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Remaining in M1 (toward closing the milestone)
+- Wire **`[deps.akshara]`** — draw rollout prompts from a real tokenized corpus
+  (replaces the synthetic `rng % V` vocab).
+- De-feature attn11's `--objective rl` (its own cut — REINFORCE now lives here).
+
+## [0.2.0] - 2026-06-22
+
+**M1 core — REINFORCE comes home.** tarka's first real RL surface: a minimal
+rosnet-backed policy trained by on-policy REINFORCE, the agency counterpoint to
+attn11's supervised learner. No transformer yet — the loop is the point, proven
+end-to-end with finite-difference grad-checks.
+
 ### Added
 - **M1 — REINFORCE on a minimal rosnet-backed policy (core).** The first real RL
   surface: a minimal autoregressive softmax policy — token embedding `E(V×D)` +
@@ -21,11 +33,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   against central finite differences (attn11 discipline). Policy backward
   (dW/dE/db) FD-checked — maxrel ≤ 2e-9; the RL advantage-scaling identity
   (`grad(scale=A) == A·grad(scale=1)`) exact. **4/4 green.**
-
-### Remaining in M1
-- Wire **`[deps.akshara]`** — draw rollout prompts from a real tokenized corpus
-  (replaces the synthetic `rng % V` vocab).
-- De-feature attn11's `--objective rl` (its own cut — REINFORCE now lives here).
 
 ## [0.1.0] - 2026-06-22
 

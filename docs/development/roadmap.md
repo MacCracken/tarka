@@ -21,7 +21,7 @@
 - Deps wired: rosnet 0.2.0 (CPU) + tyche 0.1.1.
 - [ADR 0001](../adr/0001-tarka-scope-and-rl-migration.md) — scope + migration boundary.
 
-### M1 — REINFORCE migration (v0.2.0)
+### M1 — REINFORCE migration (v0.2.0) — core shipped 2026-06-22
 
 Bring attn11's `--objective rl` home and **re-express it on rosnet** (not a literal
 copy of attn11's in-model seeding). On-policy REINFORCE: sample rollouts from the

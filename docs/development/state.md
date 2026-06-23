@@ -5,8 +5,11 @@
 
 ## Version
 
-**0.1.0** — scaffolded 2026-06-22 via `cyrius init`. M0 (scaffold) only; no RL
-surface yet. First real milestone (M1, REINFORCE migration) is v0.2.0.
+**0.2.0** — 2026-06-22. **M1 core: REINFORCE on a minimal rosnet-backed policy.**
+The first real RL surface (`src/rl.cyr`) — policy + on-policy REINFORCE + Adam,
+demo gate **1.56 → 24.00 / 24**, grad-checks 4/4 green. (0.1.0 was the M0 scaffold.)
+Remaining to close M1: wire `[deps.akshara]` (real corpus prompts) + de-feature
+attn11's `--objective rl`.
 
 ## Toolchain
 
@@ -15,8 +18,7 @@ surface yet. First real milestone (M1, REINFORCE migration) is v0.2.0.
 
 ## Source
 
-**M1 REINFORCE core landed** (in-flight; not yet versioned — a 0.2.0 cut is the
-user's call):
+**M1 REINFORCE core — shipped at 0.2.0:**
 - `src/rl.cyr` — the minimal rosnet-backed policy (embedding + linear head;
   `π(next|cur) = softmax(E[cur]@W + b)`) + on-policy REINFORCE (rollout → reward →
   advantage `(R − EMA baseline)` → advantage-weighted softmax-CE backward) + compact
