@@ -7,6 +7,7 @@ include "lib/tyche.cyr"
 include "lib/rosnet.cyr"
 include "lib/akshara.cyr"
 include "src/rl.cyr"
+include "src/m2.cyr"
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -50,6 +51,43 @@ fn check_block(P, G, n, x, a): i64 {
     return mr;
 }
 
+# central FD grad of the critic loss ½(V(x)-target)² wrt parameter P[idx]
+fn fd_vgrad(P, idx, x, target): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS())); var lp = val_loss(x, target);
+    store64(P + idx * 8, f64_sub(save, EPS())); var lm = val_loss(x, target);
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+fn check_vblock(P, G, n, x, target): i64 {
+    var mr = f64_from(0); var i = 0;
+    while (i < n) {
+        var re = relerr(fd_vgrad(P, i, x, target), load64(G + i * 8));
+        if (f64_gt(re, mr) == 1) { mr = re; }
+        i = i + 1;
+    }
+    return mr;
+}
+# central FD grad of the PPO surrogate -L_t wrt parameter P[idx]
+fn fd_ppo(P, idx, x, a, lp_old, A): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS())); var lp = ppo_loss(x, a, lp_old, A, CLIP_EPS());
+    store64(P + idx * 8, f64_sub(save, EPS())); var lm = ppo_loss(x, a, lp_old, A, CLIP_EPS());
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+
+# independent explicit GAE advantage A_t = Σ_{l≥0} (γλ)^l · delta_{t+l} (vs the recursion)
+fn gae_explicit(t, dbuf): i64 {
+    var A = f64_from(0); var p = f64_from(1); var l = 0;
+    while (t + l < g_T) {
+        A = f64_add(A, f64_mul(p, load64(dbuf + (t + l) * 8)));
+        p = f64_mul(p, GLAM());
+        l = l + 1;
+    }
+    return A;
+}
+
 fn main() {
     alloc_init();
 
@@ -84,6 +122,128 @@ fn main() {
     }
     show("  scaling maxrel = ", mrS);
     assert(f64_lt(mrS, TOL_EXACT()), "RL grad == advantage * CE grad (exact to rounding)");
+
+    test_group("M2 critic (value head) backward grad-check");
+    pol_init(8, 4, 1, 3, 99); m2_init();      # V=8 D=4 T=1
+    var cx = 2;
+    store64(R_states, cx);
+    store64(R_ret, f64_div(f64_from(7), f64_from(10)));    # arbitrary critic target 0.7
+    pol_zero_grads(); val_zero_grads();
+    critic_backward(f64_from(1));              # analytic grads -> G_wv, G_bv, G_E (shared)
+    var ctgt = load64(R_ret);
+    var mrWv = check_vblock(P_wv, G_wv, g_D, cx, ctgt);
+    var mrBv = check_vblock(P_bv, G_bv, 1, cx, ctgt);
+    var mrVe = check_vblock(P_E, G_E, g_V * g_D, cx, ctgt);
+    show("  dWv maxrel = ", mrWv); show("  dBv maxrel = ", mrBv); show("  dE(critic) maxrel = ", mrVe);
+    assert(f64_lt(mrWv, TOL()), "critic dW (value weight) FD grad-check");
+    assert(f64_lt(mrBv, TOL()), "critic db (value bias) FD grad-check");
+    assert(f64_lt(mrVe, TOL()), "critic dE (shared embedding) FD grad-check");
+
+    test_group("M2 GAE: recursion == explicit (γλ)^l sum (boundary + role check)");
+    pol_init(8, 4, 5, 3, 7); m2_init();        # T=5
+    # arbitrary rewards + values (set directly; no rollout needed for the recursion check)
+    store64(R_rewards + 0*8, f64_from(1)); store64(R_rewards + 1*8, f64_from(0));
+    store64(R_rewards + 2*8, f64_from(1)); store64(R_rewards + 3*8, f64_from(0));
+    store64(R_rewards + 4*8, f64_from(1));
+    store64(R_values + 0*8, f64_div(f64_from(5),f64_from(10)));   # 0.5
+    store64(R_values + 1*8, f64_div(f64_from(3),f64_from(10)));   # 0.3
+    store64(R_values + 2*8, f64_div(f64_from(8),f64_from(10)));   # 0.8
+    store64(R_values + 3*8, f64_div(f64_from(2),f64_from(10)));   # 0.2
+    store64(R_values + 4*8, f64_div(f64_from(4),f64_from(10)));   # 0.4
+    gae_advantages();                          # fills R_adv via the backward recursion
+    # independent: delta_t = r_t + γ·V(s_{t+1}) - V(s_t), V(s_T)=0
+    var dbuf = t_alloc(g_T);
+    var gt = 0;
+    while (gt < g_T) {
+        var vn = f64_from(0);
+        if (gt < g_T - 1) { vn = load64(R_values + (gt + 1) * 8); }
+        store64(dbuf + gt * 8, f64_sub(f64_add(load64(R_rewards + gt*8), f64_mul(GAMMA(), vn)),
+                                       load64(R_values + gt*8)));
+        gt = gt + 1;
+    }
+    var mrGae = f64_from(0); gt = 0;
+    while (gt < g_T) {
+        var re = relerr(load64(R_adv + gt * 8), gae_explicit(gt, dbuf));
+        if (f64_gt(re, mrGae) == 1) { mrGae = re; }
+        gt = gt + 1;
+    }
+    show("  GAE recursion-vs-explicit maxrel = ", mrGae);
+    assert(f64_lt(mrGae, TOL_EXACT()), "GAE A_t recursion == explicit (γλ)^l sum (exact)");
+    # return identity: Ghat_t == A_t + V(s_t)
+    var mrRet = f64_from(0); gt = 0;
+    while (gt < g_T) {
+        var re = relerr(load64(R_ret + gt*8), f64_add(load64(R_adv + gt*8), load64(R_values + gt*8)));
+        if (f64_gt(re, mrRet) == 1) { mrRet = re; }
+        gt = gt + 1;
+    }
+    assert(f64_lt(mrRet, TOL_EXACT()), "GAE return Ghat_t == A_t + V(s_t) (exact)");
+
+    test_group("M2 PPO: rho=1 == advantage-REINFORCE, clip zeroes, FD unclipped");
+    pol_init(8, 4, 1, 3, 99); m2_init();      # T=1
+    store64(R_states, 2); store64(R_actions, 5);
+    var Appo = f64_div(f64_from(3), f64_from(2));   # advantage 1.5
+    store64(R_adv, Appo);
+    # (a) rho=1: snapshot at current params -> ppo_backward seed == rl_backward(A) exactly
+    ppo_snapshot();
+    pol_zero_grads(); ppo_backward();
+    var ppoW = t_alloc(g_D * g_V); t_copy(ppoW, G_W, g_D * g_V);
+    pol_zero_grads(); rl_backward(Appo);
+    var mrPP = f64_from(0); var pi = 0;
+    while (pi < g_D * g_V) { var re = relerr(load64(ppoW + pi*8), load64(G_W + pi*8)); if (f64_gt(re, mrPP) == 1) { mrPP = re; } pi = pi + 1; }
+    show("  PPO rho=1 vs REINFORCE maxrel = ", mrPP);
+    assert(f64_lt(mrPP, TOL_EXACT()), "PPO rho=1 seed == advantage-REINFORCE (exact)");
+    # (b) FD of the unclipped surrogate (rho=1) wrt P_W == ppo_backward G_W
+    var lp0 = load64(R_logpold);
+    pol_zero_grads(); ppo_backward();
+    var mrPU = f64_from(0); pi = 0;
+    while (pi < g_D * g_V) { var re = relerr(fd_ppo(P_W, pi, 2, 5, lp0, Appo), load64(G_W + pi*8)); if (f64_gt(re, mrPU) == 1) { mrPU = re; } pi = pi + 1; }
+    show("  PPO unclipped FD maxrel = ", mrPU);
+    assert(f64_lt(mrPU, TOL()), "PPO unclipped surrogate FD grad-check");
+    # (c) clipped: rho = exp(+1) ~ 2.718 > 1+eps, A>0 -> binding clip -> X=0 -> G_W all zero
+    store64(R_logpold, f64_sub(lp0, f64_from(1)));
+    pol_zero_grads(); ppo_backward();
+    var maxG = f64_from(0); pi = 0;
+    while (pi < g_D * g_V) { var ag = f64_abs(load64(G_W + pi*8)); if (f64_gt(ag, maxG) == 1) { maxG = ag; } pi = pi + 1; }
+    show("  PPO clipped max|G_W| = ", maxG);
+    assert(f64_lt(maxG, TOL_EXACT()), "PPO binding clip (A>0, rho>1+eps) -> zero gradient");
+
+    test_group("M2 GRPO: group-relative advantage + ratio=1 seed");
+    pol_init(8, 4, 3, 3, 7); m2_init();        # T=3
+    # group-norm {2,1} (G=2) -> [+1,-1]
+    store64(GR_R + 0*8, f64_from(2)); store64(GR_R + 1*8, f64_from(1)); grpo_group_adv(2);
+    assert(f64_lt(relerr(load64(GR_adv + 0*8), f64_from(1)), TOL()), "GRPO {2,1} -> Â_0=+1");
+    assert(f64_lt(relerr(load64(GR_adv + 1*8), f64_neg(f64_from(1))), TOL()), "GRPO {2,1} -> Â_1=-1");
+    # {0,1,2} (G=3) -> [-sqrt(3/2), 0, +sqrt(3/2)]
+    store64(GR_R + 0*8, f64_from(0)); store64(GR_R + 1*8, f64_from(1)); store64(GR_R + 2*8, f64_from(2)); grpo_group_adv(3);
+    var s32 = f64_sqrt(f64_div(f64_from(3), f64_from(2)));
+    assert(f64_lt(relerr(load64(GR_adv + 0*8), f64_neg(s32)), TOL()), "GRPO {0,1,2} -> Â_0=-sqrt(3/2)");
+    assert(f64_lt(f64_abs(load64(GR_adv + 1*8)), TOL()), "GRPO {0,1,2} -> Â_1=0");
+    assert(f64_lt(relerr(load64(GR_adv + 2*8), s32), TOL()), "GRPO {0,1,2} -> Â_2=+sqrt(3/2)");
+    # all-equal -> 0 (no NaN: 0/(0+eps))
+    store64(GR_R + 0*8, f64_from(5)); store64(GR_R + 1*8, f64_from(5)); store64(GR_R + 2*8, f64_from(5)); grpo_group_adv(3);
+    var maxA = f64_from(0); var gi = 0;
+    while (gi < 3) { var ag = f64_abs(load64(GR_adv + gi*8)); if (f64_gt(ag, maxA) == 1) { maxA = ag; } gi = gi + 1; }
+    assert(f64_lt(maxA, TOL_EXACT()), "GRPO all-equal group -> Â=0 (no NaN)");
+    # ratio=1 anchor: fill group row 0 from a rollout, snapshot, grpo_backward(1) == rl_backward(Â)
+    rl_rollout(rl_prompt());
+    var gt2 = 0;
+    while (gt2 < g_T) { store64(GR_states + gt2*8, load64(R_states + gt2*8)); store64(GR_actions + gt2*8, load64(R_actions + gt2*8)); gt2 = gt2 + 1; }
+    gt2 = 0;
+    while (gt2 < g_T) {
+        var gx = load64(GR_states + gt2*8); var ga = load64(GR_actions + gt2*8);
+        pol_logits(gx); pol_softmax();
+        store64(GR_oldlp + gt2*8, f64_ln(load64(S_probs + ga*8)));
+        gt2 = gt2 + 1;
+    }
+    var Agr = f64_div(f64_from(7), f64_from(10));   # advantage 0.7
+    store64(GR_adv, Agr);
+    pol_zero_grads(); grpo_backward(1, f64_from(1));   # G=1, invN=1, ratio=1 -> seed = Â per step
+    var grW = t_alloc(g_D * g_V); t_copy(grW, G_W, g_D * g_V);
+    pol_zero_grads(); rl_backward(Agr);                # reference over R_states/R_actions (= group row 0)
+    var mrGR = f64_from(0); gi = 0;
+    while (gi < g_D * g_V) { var re = relerr(load64(grW + gi*8), load64(G_W + gi*8)); if (f64_gt(re, mrGR) == 1) { mrGR = re; } gi = gi + 1; }
+    show("  GRPO ratio=1 vs REINFORCE maxrel = ", mrGR);
+    assert(f64_lt(mrGR, TOL_EXACT()), "GRPO ratio=1 seed == advantage-REINFORCE (exact)");
 
     return assert_summary();
 }

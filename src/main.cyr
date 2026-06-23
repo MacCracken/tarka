@@ -7,6 +7,7 @@ include "lib/tyche.cyr"    # rng_seed / rng_uniform / rng_u64 / rng_normal
 include "lib/rosnet.cyr"   # linear_fwd / linear_bwd / t_*  (t_randn -> tyche)
 include "lib/akshara.cyr"  # corpus_set / gd_ld / g_char2id / g_datalen  (the tokenizer)
 include "src/rl.cyr"       # the policy + REINFORCE (rl_prompt draws from the corpus)
+include "src/m2.cyr"       # M2: actor-critic, GAE, PPO, GRPO
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -59,12 +60,30 @@ fn main(): i64 {
     var r1 = rl_eval(200);
     puts("  reward after:  "); print_f2(r1); _putc(10);
 
-    # gate: REINFORCE raised the target's sample frequency at least 2x
-    if (f64_gt(r1, f64_mul(r0, f64_from(2))) == 1) {
-        puts("  GATE PASS: target frequency rose >=2x under REINFORCE\n");
+    # ---- M2: actor-critic PPO + GRPO learn the same task ----
+    puts("\n--- M2: actor-critic PPO + group-relative GRPO (same corpus task) ---\n");
+    pol_init(V, D, T, target, 2024); m2_init();
+    var p0 = rl_eval(200);
+    ppo_train(250, 4, f64_div(f64_from(5), f64_from(100)), 0);   # 250 steps × 4 epochs, lr 0.05
+    var p1 = rl_eval(200);
+    puts("  PPO  (critic+GAE, clip 0.2, 4 epochs): "); print_f2(p0); puts(" -> "); print_f2(p1); _putc(10);
+
+    pol_init(V, D, T, target, 2024); m2_init();
+    var q0 = rl_eval(200);
+    grpo_train(250, 8, f64_div(f64_from(5), f64_from(100)), 0);  # 250 steps, group 8, lr 0.05
+    var q1 = rl_eval(200);
+    puts("  GRPO (group 8, no critic, clip 0.2):   "); print_f2(q0); puts(" -> "); print_f2(q1); _putc(10);
+
+    # gate: all three (REINFORCE, PPO, GRPO) raised the target frequency >=2x
+    var ok = 1;
+    if (f64_gt(r1, f64_mul(r0, f64_from(2))) == 0) { ok = 0; }
+    if (f64_gt(p1, f64_mul(p0, f64_from(2))) == 0) { ok = 0; }
+    if (f64_gt(q1, f64_mul(q0, f64_from(2))) == 0) { ok = 0; }
+    if (ok == 1) {
+        puts("\n  GATE PASS: REINFORCE + PPO + GRPO all raised target frequency >=2x\n");
         return 0;
     }
-    puts("  GATE FAIL: target frequency did not rise\n");
+    puts("\n  GATE FAIL: not all methods learned\n");
     return 1;
 }
 

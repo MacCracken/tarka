@@ -52,6 +52,12 @@ advantage estimation, and a clipped surrogate (PPO) / group-relative (GRPO) obje
 
 - **Acceptance**: critic + GAE + clipped objective grad-checked; a control task where
   PPO/GRPO measurably beats bare REINFORCE on sample efficiency.
+- **Core ✅ (in-flight)**: `src/m2.cyr` — critic + GAE + PPO + GRPO, math adversarially
+  verified (8-agent design workflow vs Schulman/DeepSeek) then **grad-checked: +15 checks,
+  19/19 green** (critic FD-exact; GAE recursion==explicit; PPO ρ=1==REINFORCE + clip→0;
+  GRPO group-norm + ratio=1==REINFORCE). Demo: all three learn (PPO 0.81→23.78, GRPO →24.00).
+- **Remaining**: the parity control task + the head-to-head **sample-efficiency benchmark**
+  (the acceptance criterion above) → then cut **0.3.0**.
 
 ### M3 — Reward & process-reward models (v0.4.0)
 

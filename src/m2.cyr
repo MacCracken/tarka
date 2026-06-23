@@ -1,0 +1,349 @@
+# tarka — M2: actor-critic, GAE, PPO, GRPO (additive to the M1 REINFORCE in rl.cyr).
+#
+# Builds on the same minimal softmax-bigram policy. Adds:
+#   - a scalar VALUE CRITIC  V(s) = w_v·E[s] + b_v  sharing the policy embedding E
+#     (shared-trunk actor-critic), trained by MSE regression to the GAE return.
+#   - GENERALIZED ADVANTAGE ESTIMATION (Schulman 2015): per-step rewards + critic
+#     bootstrap → low-variance per-step advantages A_t.
+#   - PPO clipped surrogate (Schulman 2017): importance ratio vs a frozen snapshot,
+#     clipped, multi-epoch reuse of collected rollouts.
+#   - GRPO (DeepSeek): group-relative normalized advantage, no critic, same clip.
+#
+# Every backward is expressed in rl.cyr's convention: seed dlogits=(probs-onehot(a))·X
+# over S_probs, then linear_bwd + scatter into G_E; gradient DESCENT. The PPO/GRPO
+# seed reduces EXACTLY to M1's A·(probs-onehot) at importance-ratio 1 (the grad-check
+# anchor). Math adversarially verified (workflow wf_aa0eefde) against Schulman/DeepSeek.
+#
+# Include AFTER rl.cyr (uses g_V/g_D/g_T, P_E/P_W/P_b, pol_logits/pol_softmax, S_probs,
+# R_states/R_actions, linear_bwd, t_*, the Adam helpers, g_b1t/g_b2t).
+
+# ---- hyperparameters --------------------------------------------------------
+fn GAMMA(): i64 { return f64_div(f64_from(99), f64_from(100)); }            # 0.99 discount
+fn LAM(): i64 { return f64_div(f64_from(95), f64_from(100)); }             # 0.95 GAE lambda
+fn GLAM(): i64 { return f64_mul(GAMMA(), LAM()); }                         # gamma*lambda
+fn CLIP_EPS(): i64 { return f64_div(f64_from(2), f64_from(10)); }          # 0.2 PPO clip
+fn ADV_EPS(): i64 { return f64_div(f64_from(1), f64_from(100000000)); }    # 1e-8 (std floor)
+fn VAL_COEF(): i64 { return f64_div(f64_from(1), f64_from(2)); }           # 0.5 value-loss weight
+
+# ---- critic parameters (shared embedding E; own head w_v,b_v) ----------------
+var P_wv = 0;  var P_bv = 0;                # weight (D), bias (1)
+var G_wv = 0;  var G_bv = 0;                # grads
+var M_wv = 0;  var V_wv = 0;                # adam moments (weight)
+var M_bv = 0;  var V_bv = 0;                # adam moments (bias)
+var S_vout = 0;   # 1   critic forward output
+var S_dval = 0;   # 1   critic dy seed (V - target)
+var S_vdemb = 0;  # D   critic dx (embedding grad)
+
+# ---- GAE / per-step rollout buffers (length T) ------------------------------
+var R_rewards = 0;  # r_t
+var R_values = 0;   # V(s_t)
+var R_adv = 0;      # GAE advantage A_t (also the policy scale)
+var R_ret = 0;      # GAE return Ghat_t = A_t + V(s_t) (critic target)
+var R_logpold = 0;  # ln pi_old(a_t|s_t) snapshot (PPO)
+
+# ---- GRPO group buffers (GMAX rollouts × T) ---------------------------------
+fn GMAX(): i64 { return 8; }                 # max group size
+var GR_states = 0;  # GMAX*T  states per group rollout
+var GR_actions = 0; # GMAX*T  actions per group rollout
+var GR_oldlp = 0;   # GMAX*T  ln pi_old(a|s) snapshot per group rollout
+var GR_R = 0;       # GMAX    terminal reward per rollout
+var GR_adv = 0;     # GMAX    group-relative advantage per rollout
+
+fn m2_init(): i64 {
+    P_wv = t_alloc(g_D); P_bv = t_alloc(1);
+    G_wv = t_alloc(g_D); G_bv = t_alloc(1);
+    M_wv = t_alloc(g_D); V_wv = t_alloc(g_D);
+    M_bv = t_alloc(1);   V_bv = t_alloc(1);
+    S_vout = t_alloc(1); S_dval = t_alloc(1); S_vdemb = t_alloc(g_D);
+    R_rewards = t_alloc(g_T); R_values = t_alloc(g_T);
+    R_adv = t_alloc(g_T); R_ret = t_alloc(g_T); R_logpold = t_alloc(g_T);
+    GR_states = t_alloc(GMAX() * g_T); GR_actions = t_alloc(GMAX() * g_T);
+    GR_oldlp = t_alloc(GMAX() * g_T); GR_R = t_alloc(GMAX()); GR_adv = t_alloc(GMAX());
+    t_randn(P_wv, g_D, f64_div(f64_from(1), f64_from(10)));   # std 0.1
+    t_zero(P_bv, 1);
+    return 0;
+}
+
+# ---- f64 helpers (no builtins for min/max/clip) -----------------------------
+fn f64_min2(a, b): i64 { if (f64_lt(a, b) == 1) { return a; } return b; }
+fn f64_max2(a, b): i64 { if (f64_gt(a, b) == 1) { return a; } return b; }
+fn f64_clip(v, lo, hi): i64 { return f64_max2(lo, f64_min2(hi, v)); }
+
+# ---- critic ----------------------------------------------------------------
+# V(s) = w_v·E[s] + b_v, via rosnet linear_fwd with N=1 (scalar output; the N=1
+# path runs the scalar tail, so it is bit-exact).
+fn vval(x): i64 {
+    linear_fwd(P_E + x * g_D * 8, P_wv, P_bv, S_vout, 1, g_D, 1);
+    return load64(S_vout);
+}
+
+# forward-only critic loss  ½(V(x) - target)²  — the FD grad-check perturbs a param
+# and calls this (analogue of pol_ce).
+fn val_loss(x, target): i64 {
+    var d = f64_sub(vval(x), target);
+    return f64_mul(f64_div(f64_from(1), f64_from(2)), f64_mul(d, d));
+}
+
+fn val_zero_grads(): i64 { t_zero(G_wv, g_D); t_zero(G_bv, 1); return 0; }
+
+# Accumulate the critic gradient over the frozen rollout into G_wv/G_bv and (shared)
+# G_E. Per step: dv = (V(s_t) - target_t)·scale  [target_t = R_ret[t], a stop-grad
+# constant]; seed S_dval = dv; linear_bwd(N=1) → dW(G_wv)+=emb·dv, db(G_bv)+=dv,
+# dx(S_vdemb)=dv·w_v; scatter into G_E[s_t]. scale = value-loss weight (1 for the
+# grad-check; VAL_COEF in training).
+fn critic_backward(scale): i64 {
+    var t = 0;
+    while (t < g_T) {
+        var x = load64(R_states + t * 8);
+        var dv = f64_mul(f64_sub(vval(x), load64(R_ret + t * 8)), scale);
+        store64(S_dval, dv);
+        linear_bwd(P_E + x * g_D * 8, P_wv, S_dval, S_vdemb, G_wv, G_bv, 1, g_D, 1);
+        t_add_into(G_E + x * g_D * 8, S_vdemb, g_D);     # shared-E: adds to policy's d_emb
+        t = t + 1;
+    }
+    return 0;
+}
+
+# Adam on the critic head (own bias-correction powers, advanced in lockstep callers).
+fn critic_adam_step(lr): i64 {
+    adam_one(P_wv, G_wv, M_wv, V_wv, g_D, lr);
+    adam_one(P_bv, G_bv, M_bv, V_bv, 1, lr);
+    return 0;
+}
+
+# ---- GAE --------------------------------------------------------------------
+# r_t = 1 if the sampled action hit the target token, else 0 (Σ r_t == rl_reward()).
+fn gae_fill_rewards(): i64 {
+    var t = 0;
+    while (t < g_T) {
+        var r = f64_from(0);
+        if (load64(R_actions + t * 8) == g_target) { r = f64_from(1); }
+        store64(R_rewards + t * 8, r);
+        t = t + 1;
+    }
+    return 0;
+}
+
+# V(s_t) for every state in the frozen rollout.
+fn gae_values(): i64 {
+    var t = 0;
+    while (t < g_T) { store64(R_values + t * 8, vval(load64(R_states + t * 8))); t = t + 1; }
+    return 0;
+}
+
+# GAE advantages + returns. delta_t = r_t + gamma·V(s_{t+1}) - V(s_t), V(s_T)=0;
+# A_t = delta_t + (gamma·lambda)·A_{t+1}, A_T=0 (backward sweep); Ghat_t = A_t + V(s_t).
+fn gae_advantages(): i64 {
+    var A = f64_from(0);
+    var t = g_T - 1;
+    while (t >= 0) {
+        var vnext = f64_from(0);
+        if (t < g_T - 1) { vnext = load64(R_values + (t + 1) * 8); }
+        var delta = f64_sub(f64_add(load64(R_rewards + t * 8), f64_mul(GAMMA(), vnext)),
+                            load64(R_values + t * 8));
+        A = f64_add(delta, f64_mul(GLAM(), A));
+        store64(R_adv + t * 8, A);
+        store64(R_ret + t * 8, f64_add(A, load64(R_values + t * 8)));   # critic target
+        t = t - 1;
+    }
+    return 0;
+}
+
+# in-place mean-0 / std-1 normalization of R_adv over the rollout (PPO practice;
+# skip if std < eps to avoid blow-up). Critic regresses UN-normalized returns, so
+# call this AFTER gae_advantages stored R_ret.
+fn gae_normalize(): i64 {
+    var mean = f64_div(t_sum(R_adv, g_T), f64_from(g_T));
+    var var0 = f64_from(0); var t = 0;
+    while (t < g_T) { var d = f64_sub(load64(R_adv + t*8), mean); var0 = f64_add(var0, f64_mul(d,d)); t = t + 1; }
+    var sd = f64_sqrt(f64_div(var0, f64_from(g_T)));
+    if (f64_lt(sd, ADV_EPS()) == 1) { return 0; }       # degenerate: leave as-is
+    var inv = f64_div(f64_from(1), f64_add(sd, ADV_EPS()));
+    t = 0;
+    while (t < g_T) { store64(R_adv + t*8, f64_mul(f64_sub(load64(R_adv + t*8), mean), inv)); t = t + 1; }
+    return 0;
+}
+
+# ---- PPO (Schulman 2017) ----------------------------------------------------
+# Snapshot ln pi_old(a_t|s_t) over the frozen rollout, BEFORE any param update so
+# pi_old == the sampling policy. Reads R_states/R_actions, writes R_logpold.
+fn ppo_snapshot(): i64 {
+    var t = 0;
+    while (t < g_T) {
+        var x = load64(R_states + t*8); var a = load64(R_actions + t*8);
+        pol_logits(x); pol_softmax();
+        store64(R_logpold + t*8, f64_ln(load64(S_probs + a*8)));
+        t = t + 1;
+    }
+    return 0;
+}
+
+# PPO per-step seed scalar X (the mean 1/N is applied by the caller). X = rho*A in
+# the active region; 0 in the BINDING-clip region: (A>0 & rho>1+eps) | (A<0 & rho<1-eps)
+# | A==0. NOTE the asymmetry — A>0 & rho<1-eps is NOT zeroed (it pulls rho back up).
+fn ppo_scale(rho, A, eps): i64 {
+    var hi = f64_add(f64_from(1), eps); var lo = f64_sub(f64_from(1), eps);
+    if (f64_gt(A, f64_from(0)) == 1) {
+        if (f64_gt(rho, hi) == 1) { return f64_from(0); }       # A>0 overshoot up
+    } elif (f64_lt(A, f64_from(0)) == 1) {
+        if (f64_lt(rho, lo) == 1) { return f64_from(0); }       # A<0 overshoot down
+    } else { return f64_from(0); }                              # A==0
+    return f64_mul(rho, A);
+}
+
+# PPO backward over the frozen rollout. Per step: rho = exp(ln pi_new - R_logpold);
+# X = ppo_scale(rho, R_adv[t], eps); seed dlogits=(probs-onehot)*X; linear_bwd + scatter.
+# At rho=1 (fresh snapshot) X = R_adv[t] -> EXACTLY M1's per-step advantage-REINFORCE seed.
+fn ppo_backward(): i64 {
+    var t = 0;
+    while (t < g_T) {
+        var x = load64(R_states + t*8); var a = load64(R_actions + t*8);
+        pol_logits(x); pol_softmax();
+        var rho = f64_exp(f64_sub(f64_ln(load64(S_probs + a*8)), load64(R_logpold + t*8)));
+        var X = ppo_scale(rho, load64(R_adv + t*8), CLIP_EPS());
+        store64(S_probs + a*8, f64_sub(load64(S_probs + a*8), f64_from(1)));
+        var v = 0;
+        while (v < g_V) { store64(S_probs + v*8, f64_mul(load64(S_probs + v*8), X)); v = v + 1; }
+        linear_bwd(P_E + x*g_D*8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
+        t_add_into(G_E + x*g_D*8, S_demb, g_D);
+        t = t + 1;
+    }
+    return 0;
+}
+
+# forward-only PPO surrogate -L_t for one (state, action, snapshot, advantage) — the
+# FD grad-check perturbs a policy param and calls this. -L = -min(rho*A, clip(rho)*A).
+fn ppo_loss(x, a, lp_old, A, eps): i64 {
+    pol_logits(x); pol_softmax();
+    var rho = f64_exp(f64_sub(f64_ln(load64(S_probs + a*8)), lp_old));
+    var unclipped = f64_mul(rho, A);
+    var clipped = f64_mul(f64_clip(rho, f64_sub(f64_from(1), eps), f64_add(f64_from(1), eps)), A);
+    return f64_neg(f64_min2(unclipped, clipped));
+}
+
+# ---- GRPO (DeepSeek group-relative policy optimization; no critic) ----------
+# Group-relative normalized advantage from the terminal rewards GR_R[0..G-1]:
+# Â_g = (R_g - mean) / (popstd + eps). Computing numerator + denominator separately
+# makes the all-equal case collapse to 0/(0+eps) = 0 (no NaN). One scalar per rollout,
+# assigned to every token of that rollout.
+fn grpo_group_adv(G): i64 {
+    var mean = f64_div(t_sum(GR_R, G), f64_from(G));
+    var var0 = f64_from(0); var g = 0;
+    while (g < G) { var d = f64_sub(load64(GR_R + g*8), mean); var0 = f64_add(var0, f64_mul(d,d)); g = g + 1; }
+    var sd = f64_sqrt(f64_div(var0, f64_from(G)));        # POPULATION std (÷G)
+    var inv = f64_div(f64_from(1), f64_add(sd, ADV_EPS()));
+    g = 0;
+    while (g < G) { store64(GR_adv + g*8, f64_mul(f64_sub(load64(GR_R + g*8), mean), inv)); g = g + 1; }
+    return 0;
+}
+
+# importance ratio for token t of group rollout g under current params.
+fn grpo_ratio(g, t): i64 {
+    var base = (g * g_T + t) * 8;
+    var x = load64(GR_states + base); var a = load64(GR_actions + base);
+    pol_logits(x); pol_softmax();
+    return f64_exp(f64_sub(f64_ln(load64(S_probs + a*8)), load64(GR_oldlp + base)));
+}
+
+# clipped-surrogate subgradient coefficient: Â*r if the unclipped branch is active
+# (r*Â <= clip(r)*Â), else 0. (At r=1 this is Â — the grad-check anchor.)
+fn grpo_coeff(adv, r): i64 {
+    var unclipped = f64_mul(r, adv);
+    var clipped = f64_mul(f64_clip(r, f64_sub(f64_from(1), CLIP_EPS()), f64_add(f64_from(1), CLIP_EPS())), adv);
+    if (f64_lt(clipped, unclipped) == 1) { return f64_from(0); }   # clipped branch chosen -> flat
+    return unclipped;
+}
+
+# GRPO backward over G group rollouts. Per (g,t): r = grpo_ratio; c = grpo_coeff(Â_g, r)
+# * invN; seed dlogits=(probs-onehot)*c; linear_bwd + scatter. invN = 1/(G*T).
+fn grpo_backward(G, invN): i64 {
+    var g = 0;
+    while (g < G) {
+        var adv = load64(GR_adv + g*8);
+        var t = 0;
+        while (t < g_T) {
+            var base = (g * g_T + t) * 8;
+            var x = load64(GR_states + base); var a = load64(GR_actions + base);
+            var r = grpo_ratio(g, t);                       # recomputes S_probs for (x)
+            var c = f64_mul(grpo_coeff(adv, r), invN);
+            store64(S_probs + a*8, f64_sub(load64(S_probs + a*8), f64_from(1)));
+            var v = 0;
+            while (v < g_V) { store64(S_probs + v*8, f64_mul(load64(S_probs + v*8), c)); v = v + 1; }
+            linear_bwd(P_E + x*g_D*8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
+            t_add_into(G_E + x*g_D*8, S_demb, g_D);
+            t = t + 1;
+        }
+        g = g + 1;
+    }
+    return 0;
+}
+
+# ---- training loops ---------------------------------------------------------
+# scale every policy + critic grad block by `s` (mean over the update minibatch).
+fn m2_scale_grads(s): i64 {
+    t_scale(G_W, g_D * g_V, s); t_scale(G_b, g_V, s); t_scale(G_E, g_V * g_D, s);
+    t_scale(G_wv, g_D, s); t_scale(G_bv, 1, s);
+    return 0;
+}
+
+# PPO actor-critic, batch=1 multi-epoch (the multi-epoch reuse is PPO's point): per
+# step collect ONE rollout, compute per-step GAE advantages (critic baseline),
+# snapshot pi_old, then run `epochs` clipped-surrogate updates reusing it (ratio
+# drifts from 1 -> clip engages). The critic regresses the GAE return each epoch.
+fn ppo_train(steps, epochs, lr, log_every): i64 {
+    var invT = f64_div(f64_from(1), f64_from(g_T));
+    var meanR = f64_from(0);
+    var s = 0;
+    while (s < steps) {
+        rl_rollout(rl_prompt());
+        meanR = rl_reward();
+        gae_fill_rewards(); gae_values(); gae_advantages();   # R_adv (per-step), R_ret (critic target)
+        ppo_snapshot();                                       # R_logpold (pi_old; ratio=1 at epoch 0)
+        var e = 0;
+        while (e < epochs) {
+            pol_zero_grads(); val_zero_grads();
+            ppo_backward();                                   # clipped policy surrogate
+            critic_backward(VAL_COEF());                      # value MSE (weight 0.5)
+            m2_scale_grads(invT);                             # mean over the T steps
+            pol_adam_step(lr);                                # advances g_b1t/g_b2t once
+            critic_adam_step(lr);                             # critic blocks, same step's bias-corr
+            e = e + 1;
+        }
+        s = s + 1;
+    }
+    return meanR;
+}
+
+# GRPO single-epoch group-relative (no critic): per step sample G rollouts under a
+# frozen snapshot, baseline by the group mean, normalized advantage, one clipped
+# update. (Ratio=1 at the single epoch -> group-relative REINFORCE, GRPO's essence.)
+fn grpo_train(steps, G, lr, log_every): i64 {
+    var invN = f64_div(f64_from(1), f64_from(G * g_T));
+    var meanR = f64_from(0);
+    var s = 0;
+    while (s < steps) {
+        var rsum = f64_from(0);
+        var g = 0;
+        while (g < G) {
+            rl_rollout(rl_prompt());
+            var t = 0;
+            while (t < g_T) {
+                var base = (g * g_T + t) * 8;
+                var xt = load64(R_states + t*8); var at = load64(R_actions + t*8);
+                store64(GR_states + base, xt); store64(GR_actions + base, at);
+                pol_logits(xt); pol_softmax();
+                store64(GR_oldlp + base, f64_ln(load64(S_probs + at*8)));
+                t = t + 1;
+            }
+            var R = rl_reward(); store64(GR_R + g*8, R); rsum = f64_add(rsum, R);
+            g = g + 1;
+        }
+        grpo_group_adv(G);
+        pol_zero_grads();
+        grpo_backward(G, invN);
+        pol_adam_step(lr);
+        meanR = f64_div(rsum, f64_from(G));
+        s = s + 1;
+    }
+    return meanR;
+}

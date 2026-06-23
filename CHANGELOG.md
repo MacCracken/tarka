@@ -4,8 +4,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Remaining in M1 (toward closing the milestone)
-- De-feature attn11's `--objective rl` (its own cut — REINFORCE now lives here).
+### Added — M2 core: actor-critic, GAE, PPO, GRPO (`src/m2.cyr`)
+- **Value critic** — scalar head `V(s) = w_v·E[s] + b_v` sharing the policy embedding
+  (shared-trunk actor-critic), regressed by MSE to the GAE return; built on rosnet
+  `linear_fwd`/`linear_bwd` with `N=1` (bit-exact scalar head).
+- **GAE** (Schulman 2015) — per-step rewards + critic bootstrap → low-variance per-step
+  advantages: `δ_t = r_t + γV(s_{t+1}) − V(s_t)` (V(s_T)=0), `A_t = δ_t + γλ·A_{t+1}`,
+  return `Ĝ_t = A_t + V(s_t)`. γ=0.99, λ=0.95.
+- **PPO** (Schulman 2017) — frozen `π_old` snapshot, importance ratio `ρ = exp(lnπ_θ −
+  lnπ_old)`, clipped surrogate; per-step seed `X = ρ·A` in the trust region, **0** in the
+  binding-clip half-space (`(A>0 ∧ ρ>1+ε) ∨ (A<0 ∧ ρ<1−ε)`), reducing **exactly** to M1's
+  `A·(probs−onehot)` at ρ=1. Multi-epoch reuse. `ppo_train` (actor-critic, clip 0.2).
+- **GRPO** (DeepSeek) — no critic; group-relative normalized advantage
+  `Â_g = (R_g − mean)/(popstd + ε)` (std=0 → 0, no NaN), same clipped surrogate.
+  `grpo_train` (group-relative).
+- **Design** adversarially verified before implementation (8-agent workflow: derive +
+  cross-check vs Schulman/DeepSeek and vs tarka's `(probs−onehot)·X` descent convention).
+
+### Verified
+- **+15 grad-checks (4 → 19, all green):** critic dW/db/dE (FD, exact); GAE recursion ==
+  explicit `Σ(γλ)^l δ` + return identity (exact); PPO ρ=1 == advantage-REINFORCE (exact),
+  unclipped surrogate FD (3e-9), binding-clip → zero gradient (exact); GRPO group-norm
+  anchors ({2,1}→±1, {0,1,2}→±√1.5, all-equal→0) + ratio=1 == advantage-REINFORCE (exact).
+  M1's 4 grad-checks unchanged.
+- **Demo:** on the corpus task all three learn — REINFORCE 1.00→24.00, PPO (critic+GAE+clip)
+  0.81→23.78, GRPO (group-8) 0.81→24.00. Build + lint + bench/fuzz clean.
+
+### Remaining in M2 (toward 0.3.0)
+- The parity control task + the head-to-head **sample-efficiency benchmark** (PPO/GRPO
+  measurably beat REINFORCE on rollouts-to-threshold) — the formal M2 acceptance criterion.
+
+### Note
+- M1 fully closed: attn11 de-featured `--objective rl` at **attn11 1.11.1** (RL lives here now).
 
 ## [0.2.1] - 2026-06-22
 

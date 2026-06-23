@@ -27,13 +27,22 @@ scaffold.) **Remaining to close M1:** de-feature attn11's `--objective rl` (its 
 - `src/main.cyr` — demo: tokenizes a corpus via akshara (`corpus_set`), rewards the
   space token; rollout frequency rises **1.00 → 24.00 / 24** under REINFORCE.
 
-**Remaining in M1:** de-feature attn11's `--objective rl` (its own cut — REINFORCE
-now lives here).
+**M1 closed:** attn11 de-featured `--objective rl` at **attn11 1.11.1** (RL lives here).
+
+**M2 core — actor-critic / PPO / GRPO (in-flight, not yet versioned; 0.3.0 cut pending):**
+- `src/m2.cyr` — value critic `V(s)=w_v·E[s]+b_v` (shared-E, MSE-regressed), **GAE**
+  (γ=0.99 λ=0.95), **PPO** clipped surrogate (frozen π_old, ratio, clip 0.2, multi-epoch
+  via `ppo_train`), **GRPO** (group-relative normalized advantage, no critic, `grpo_train`).
+  Math adversarially verified (8-agent design workflow) before code; all on rosnet primitives.
+- Demo: all three learn — REINFORCE 1.00→24.00, PPO 0.81→23.78, GRPO 0.81→24.00.
+- **Remaining for M2:** the parity control task + the sample-efficiency benchmark (PPO/GRPO
+  beat REINFORCE on rollouts-to-threshold) — the formal acceptance criterion.
 
 ## Tests
 
-- `tests/tarka.tcyr` — **grad-check suite, 4/4 green**: policy backward (dW/dE/db)
-  FD-verified (maxrel ≤ 2e-9); RL advantage-scaling identity exact.
+- `tests/tarka.tcyr` — **grad-check suite, 19/19 green** (M1: 4; M2: +15 — critic dW/db/dE
+  FD-exact; GAE recursion==explicit + return identity; PPO ρ=1==REINFORCE / unclipped FD
+  3e-9 / binding-clip→0; GRPO group-norm anchors + ratio=1==REINFORCE).
 - `tests/tarka.bcyr` — benchmark stub (compiles)
 - `tests/tarka.fcyr` — fuzz stub (compiles)
 
