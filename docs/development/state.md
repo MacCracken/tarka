@@ -15,17 +15,27 @@ surface yet. First real milestone (M1, REINFORCE migration) is v0.2.0.
 
 ## Source
 
-Scaffold stub only (`src/main.cyr` prints identity + dep-wiring banner). No RL or
-reasoning code yet — that lands at M1.
+**M1 REINFORCE core landed** (in-flight; not yet versioned — a 0.2.0 cut is the
+user's call):
+- `src/rl.cyr` — the minimal rosnet-backed policy (embedding + linear head;
+  `π(next|cur) = softmax(E[cur]@W + b)`) + on-policy REINFORCE (rollout → reward →
+  advantage `(R − EMA baseline)` → advantage-weighted softmax-CE backward) + compact
+  bias-corrected Adam. Dogfoods rosnet `linear_fwd`/`linear_bwd` + tyche sampling.
+- `src/main.cyr` — demo: target-token rollout frequency rises **1.56 → 24.00 / 24**
+  under REINFORCE (the X024-style gate).
+
+**Remaining in M1:** wire `[deps.akshara]` (real tokenized corpus for prompts);
+de-feature attn11's `--objective rl` (separate cut).
 
 ## Tests
 
-- `tests/tarka.tcyr` — primary suite (smoke; passes on `cyrius test`)
-- `tests/tarka.bcyr` — benchmark stub
-- `tests/tarka.fcyr` — fuzz stub
+- `tests/tarka.tcyr` — **grad-check suite, 4/4 green**: policy backward (dW/dE/db)
+  FD-verified (maxrel ≤ 2e-9); RL advantage-scaling identity exact.
+- `tests/tarka.bcyr` — benchmark stub (compiles)
+- `tests/tarka.fcyr` — fuzz stub (compiles)
 
 Grad-check discipline (every hand-derived backward verified against central finite
-differences before it lands, inherited from attn11) begins at M1.
+differences before it lands, inherited from attn11) is **active as of M1**.
 
 ## Dependencies
 

@@ -1,21 +1,59 @@
-# tarka — main entry point
-# Stdlib + rosnet/tyche auto-included via cyrius.cyml.
-#
-# M0 (scaffold) stub: prints the project identity + the dep-wiring banner so the
-# build is exercised end-to-end. The RL/reasoning surface lands at M1 (REINFORCE
-# migration). See docs/development/roadmap.md and docs/adr/0001-*.md.
+# tarka — REINFORCE demo (M1): a minimal rosnet-backed policy learns, by on-policy
+# REINFORCE, to raise a target token's frequency in its own rollouts (the
+# demonstrable RL gate, mirroring attn11's X024). The policy + loop live in
+# src/rl.cyr; this is the driver.
 
-fn main(): i64 {
-    alloc_init();
-    println("tarka — sovereign reasoning & reinforcement-learning reference (Cyrius)");
-    println("the agency counterpoint to attn11 — see docs/adr/0001 for scope");
-    println("M0 scaffold: no RL surface yet (M1 = REINFORCE migration)");
+include "lib/tyche.cyr"    # rng_seed / rng_uniform / rng_u64 / rng_normal
+include "lib/rosnet.cyr"   # linear_fwd / linear_bwd / t_*  (t_randn -> tyche)
+include "src/rl.cyr"       # the policy + REINFORCE
+
+fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+
+# print an f64 with 2 decimals
+fn print_f2(val): i64 {
+    if (((val >> 63) & 1) == 1) { _putc(45); val = f64_abs(val); }
+    var fl = f64_floor(val);
+    fmt_int(f64_to(fl));
+    _putc(46);
+    var frac = f64_sub(val, fl);
+    var i = 0;
+    while (i < 2) {
+        frac = f64_mul(frac, f64_from(10));
+        var d = f64_floor(frac);
+        fmt_int(f64_to(d));
+        frac = f64_sub(frac, d);
+        i = i + 1;
+    }
     return 0;
 }
 
-# Split declaration from the call so main() runs as a bare assignment statement
-# (PARSE_PROG), not a module-scope `var r = main()` initializer — the latter would
-# run before the argv init-stack capture on agnos and read argc()==0. Mirrors attn11.
+fn main(): i64 {
+    alloc_init();
+    var V = 16; var D = 8; var T = 24; var target = 7;
+    pol_init(V, D, T, target, 1337);
+    puts("tarka REINFORCE demo: minimal neural-bigram policy on rosnet\n");
+    puts("  V="); fmt_int(V); puts(" D="); fmt_int(D); puts(" T="); fmt_int(T);
+    puts(" target="); fmt_int(target); _putc(10);
+
+    var r0 = rl_eval(200);
+    puts("  reward before (mean target-count out of "); fmt_int(T); puts("): ");
+    print_f2(r0); _putc(10);
+
+    rl_train(300, 16, f64_div(f64_from(5), f64_from(100)), 50);   # 300 steps, batch 16, lr 0.05
+
+    var r1 = rl_eval(200);
+    puts("  reward after:  "); print_f2(r1); _putc(10);
+
+    # gate: REINFORCE raised the target's sample frequency at least 2x
+    if (f64_gt(r1, f64_mul(r0, f64_from(2))) == 1) {
+        puts("  GATE PASS: target frequency rose >=2x under REINFORCE\n");
+        return 0;
+    }
+    puts("  GATE FAIL: target frequency did not rise\n");
+    return 1;
+}
+
 var r = 0;
 r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

@@ -32,12 +32,16 @@ the advantage `(R − b)` with an EMA baseline `b`.
   "extraction for reuse"; tarka is the 2nd consumer, parallels rosnet/tyche). **Lib
   name locked: `akshara`** (अक्षर — indivisible text/sound unit). Carve happens in
   attn11's 1.x extract/re-fold window; tarka consumes `akshara`.
-- **Acceptance**: the X024 gate reproduces here (target-char frequency rises decisively
-  under RL); the REINFORCE backward is grad-checked three ways (RL grad == advantage ×
-  AR grad to rounding; FD vs numeric gradient of `advantage × CE`; sign-flip + zero-
-  advantage limits) — the same checks that gated it in attn11.
-- **attn11 side** (separate, user-confirmed): remove `--objective rl` + RL surface;
-  attn11 reverts to a pure SFT/diffusion training reference. Version bump on user tag.
+- **Acceptance**: the X024 gate reproduces here (target-token frequency rises decisively
+  under RL); the REINFORCE backward is finite-difference grad-checked — the same
+  discipline that gated it in attn11.
+- **Progress (core ✅)**: `src/rl.cyr` — minimal rosnet-backed policy + REINFORCE +
+  Adam landed. Demo: rollout target frequency **1.56 → 24.00 / 24** under REINFORCE.
+  Grad-checks **4/4 green** (policy dW/dE/db FD-verified, maxrel ≤ 2e-9; RL
+  advantage-scaling `grad(A) == A·grad(1)` exact). Uses a synthetic vocab for now.
+- **Remaining**: (a) wire `[deps.akshara]` so rollout prompts come from a real
+  tokenized corpus; (b) **attn11 side** (separate, user-confirmed): remove
+  `--objective rl` + RL surface; attn11 reverts to a pure SFT/diffusion reference.
 
 ### M2 — GRPO / PPO + value critic (v0.3.0)
 

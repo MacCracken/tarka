@@ -1,0 +1,262 @@
+# tarka — minimal REINFORCE on a rosnet-backed policy (M1).
+#
+# A deliberately minimal autoregressive softmax policy: token embedding E(V×D) +
+# linear head W(D×V), b(V), so  pi(next | cur) = softmax(E[cur] @ W + b)  — a
+# "neural bigram". It is trained by on-policy REINFORCE (Williams 1992): sample
+# rollouts from the policy, score each with a deterministic reward (count of a
+# target token), and weight the softmax cross-entropy gradient by the advantage
+# (R - baseline). The key identity (the same one attn11's --objective rl used):
+# for a softmax head  grad log pi(a) = -grad CE(a), so the policy gradient IS the
+# softmax-CE backward over the sampled rollout scaled by the advantage — no new
+# backward math. Here that backward runs on rosnet's linear_fwd / linear_bwd
+# (matmul + its gradient); tyche supplies rollout sampling + init. No transformer:
+# the RL loop is the point, the policy is the smallest thing that carries it.
+#
+# Depends on: lib/rosnet.cyr (linear_fwd/linear_bwd, t_*), lib/tyche.cyr (rng_*).
+
+# ---- dims / reward (set by pol_init's caller) ------------------------------
+var g_V = 0;        # vocab size
+var g_D = 0;        # embedding dim
+var g_T = 0;        # rollout length (sampled actions per rollout)
+var g_target = 0;   # reward target token id
+
+# ---- parameters (rosnet f64 tensors; t_alloc = n*8 bytes, f64 per slot) -----
+var P_E = 0;        # embedding   V*D
+var P_W = 0;        # head weight D*V
+var P_b = 0;        # head bias   V
+var G_E = 0; var G_W = 0; var G_b = 0;                 # gradients (accumulate)
+var M_E = 0; var V_E = 0;                              # adam moments
+var M_W = 0; var V_W = 0;
+var M_b = 0; var V_b = 0;
+
+# ---- scratch ----------------------------------------------------------------
+var S_logits = 0;   # V   forward logits for one position
+var S_probs = 0;    # V   softmax(S_logits)
+var S_demb = 0;     # D   d_emb (dx out of linear_bwd) for one position
+var R_states = 0;   # T   rollout states (token ids)
+var R_actions = 0;  # T   rollout sampled actions (token ids)
+
+# ---- RL state ---------------------------------------------------------------
+var g_baseline = 0; # f64 EMA reward baseline b
+var g_b1t = 0;      # f64 running beta1^step (adam bias correction)
+var g_b2t = 0;      # f64 running beta2^step
+
+fn ADAM_B1(): i64 { return f64_div(f64_from(9), f64_from(10)); }            # 0.9
+fn ADAM_B2(): i64 { return f64_div(f64_from(999), f64_from(1000)); }        # 0.999
+fn ADAM_EPS(): i64 { return f64_div(f64_from(1), f64_from(100000000)); }    # 1e-8
+fn RL_BETA(): i64 { return f64_div(f64_from(9), f64_from(10)); }            # baseline EMA 0.9
+
+# Allocate + initialize. E,W ~ small Gaussian (tyche via t_randn); b = 0. Seeds
+# the RNG so a run is reproducible.
+fn pol_init(V, D, T, target, seed): i64 {
+    g_V = V; g_D = D; g_T = T; g_target = target;
+    rng_seed(seed);
+    P_E = t_alloc(V * D); P_W = t_alloc(D * V); P_b = t_alloc(V);
+    G_E = t_alloc(V * D); G_W = t_alloc(D * V); G_b = t_alloc(V);
+    M_E = t_alloc(V * D); V_E = t_alloc(V * D);
+    M_W = t_alloc(D * V); V_W = t_alloc(D * V);
+    M_b = t_alloc(V);     V_b = t_alloc(V);
+    S_logits = t_alloc(V); S_probs = t_alloc(V); S_demb = t_alloc(D);
+    R_states = t_alloc(T); R_actions = t_alloc(T);
+    # small init so early logits are near-uniform
+    t_randn(P_E, V * D, f64_div(f64_from(1), f64_from(10)));   # std 0.1
+    t_randn(P_W, D * V, f64_div(f64_from(1), f64_from(10)));
+    t_zero(P_b, V);
+    g_baseline = f64_from(0);
+    g_b1t = f64_from(1); g_b2t = f64_from(1);
+    return 0;
+}
+
+# logits for state token x -> S_logits  (emb = E[x]; logits = emb @ W + b)
+fn pol_logits(x): i64 {
+    linear_fwd(P_E + x * g_D * 8, P_W, P_b, S_logits, 1, g_D, g_V);
+    return 0;
+}
+
+# softmax(S_logits) -> S_probs (max-shifted, normalized)
+fn pol_softmax(): i64 {
+    var mx = load64(S_logits);
+    var v = 1;
+    while (v < g_V) {
+        var lv = load64(S_logits + v * 8);
+        if (f64_gt(lv, mx) == 1) { mx = lv; }
+        v = v + 1;
+    }
+    var sum = f64_from(0);
+    v = 0;
+    while (v < g_V) {
+        var e = f64_exp(f64_sub(load64(S_logits + v * 8), mx));
+        store64(S_probs + v * 8, e);
+        sum = f64_add(sum, e);
+        v = v + 1;
+    }
+    var inv = f64_div(f64_from(1), sum);
+    v = 0;
+    while (v < g_V) {
+        store64(S_probs + v * 8, f64_mul(load64(S_probs + v * 8), inv));
+        v = v + 1;
+    }
+    return 0;
+}
+
+# forward-only cross-entropy -ln pi(a | x) for one (state, action). No gradient —
+# the finite-difference grad-check perturbs a weight and calls this.
+fn pol_ce(x, a): i64 {
+    pol_logits(x); pol_softmax();
+    return f64_neg(f64_ln(load64(S_probs + a * 8)));
+}
+
+# sample a token from S_probs (already softmaxed) via the cumulative distribution
+fn pol_sample(): i64 {
+    var r = rng_uniform();               # f64 in [0,1)
+    var cum = f64_from(0);
+    var v = 0;
+    while (v < g_V) {
+        cum = f64_add(cum, load64(S_probs + v * 8));
+        if (f64_lt(r, cum) == 1) { return v; }
+        v = v + 1;
+    }
+    return g_V - 1;
+}
+
+# a rollout start state: a uniform random token (synthetic corpus). akshara wiring
+# (draw from a real tokenized corpus) is the next sub-bite.
+fn rl_prompt(): i64 { return (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V; }
+
+# sample an on-policy rollout of g_T actions; lay out (state_t, action_t) pairs.
+# x_0 = prompt; x_{t+1} sampled from pi(.|x_t) at temp 1 (on-policy: the sampling
+# distribution equals the one the gradient differentiates).
+fn rl_rollout(prompt): i64 {
+    var x = prompt;
+    var t = 0;
+    while (t < g_T) {
+        store64(R_states + t * 8, x);
+        pol_logits(x); pol_softmax();
+        var a = pol_sample();
+        store64(R_actions + t * 8, a);
+        x = a;
+        t = t + 1;
+    }
+    return 0;
+}
+
+# reward: count of sampled actions equal to the target token (f64). Monotone,
+# demonstrable — REINFORCE should raise the target's sample frequency.
+fn rl_reward(): i64 {
+    var c = 0;
+    var t = 0;
+    while (t < g_T) {
+        if (load64(R_actions + t * 8) == g_target) { c = c + 1; }
+        t = t + 1;
+    }
+    return f64_from(c);
+}
+
+fn pol_zero_grads(): i64 {
+    t_zero(G_E, g_V * g_D); t_zero(G_W, g_D * g_V); t_zero(G_b, g_V);
+    return 0;
+}
+
+# Accumulate the (scaled) policy gradient of the current rollout into G_*. For each
+# step: recompute logits+probs, seed dlogits = (probs - onehot(action)) * scale,
+# run linear_bwd (dW,db += ; dx = d_emb), scatter d_emb into G_E[state]. With
+# scale = advantage this is the REINFORCE gradient; with scale = 1 it is the plain
+# softmax-CE gradient over the rollout (the grad-check baseline). Returns the
+# rollout's summed CE (-log pi), for logging.
+fn rl_backward(scale): i64 {
+    var loss = f64_from(0);
+    var t = 0;
+    while (t < g_T) {
+        var x = load64(R_states + t * 8);
+        var a = load64(R_actions + t * 8);
+        pol_logits(x); pol_softmax();
+        loss = f64_sub(loss, f64_ln(load64(S_probs + a * 8)));
+        # dlogits = (probs - onehot(a)) * scale, written in place into S_probs
+        store64(S_probs + a * 8, f64_sub(load64(S_probs + a * 8), f64_from(1)));
+        var v = 0;
+        while (v < g_V) {
+            store64(S_probs + v * 8, f64_mul(load64(S_probs + v * 8), scale));
+            v = v + 1;
+        }
+        # dW,db += emb^T @ dlogits ; d_emb = dlogits @ W^T  (rosnet linear_bwd)
+        linear_bwd(P_E + x * g_D * 8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
+        t_add_into(G_E + x * g_D * 8, S_demb, g_D);     # scatter embedding grad
+        t = t + 1;
+    }
+    return loss;
+}
+
+# Adam update of one parameter block (uses running bias-correction powers g_b1t/g_b2t).
+fn adam_one(P, G, M, Vv, n, lr): i64 {
+    var b1 = ADAM_B1(); var b2 = ADAM_B2(); var eps = ADAM_EPS();
+    var bc1 = f64_sub(f64_from(1), g_b1t);
+    var bc2 = f64_sub(f64_from(1), g_b2t);
+    var i = 0;
+    while (i < n) {
+        var g = load64(G + i * 8);
+        var m = f64_add(f64_mul(b1, load64(M + i * 8)), f64_mul(f64_sub(f64_from(1), b1), g));
+        var vv = f64_add(f64_mul(b2, load64(Vv + i * 8)), f64_mul(f64_sub(f64_from(1), b2), f64_mul(g, g)));
+        store64(M + i * 8, m); store64(Vv + i * 8, vv);
+        var mhat = f64_div(m, bc1);
+        var vhat = f64_div(vv, bc2);
+        var step = f64_div(f64_mul(lr, mhat), f64_add(f64_sqrt(vhat), eps));
+        store64(P + i * 8, f64_sub(load64(P + i * 8), step));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn pol_adam_step(lr): i64 {
+    g_b1t = f64_mul(g_b1t, ADAM_B1());
+    g_b2t = f64_mul(g_b2t, ADAM_B2());
+    adam_one(P_E, G_E, M_E, V_E, g_V * g_D, lr);
+    adam_one(P_W, G_W, M_W, V_W, g_D * g_V, lr);
+    adam_one(P_b, G_b, M_b, V_b, g_V, lr);
+    return 0;
+}
+
+# REINFORCE training loop. Per step: zero grads; over the batch, sample a rollout,
+# score it, set advantage = R - baseline, accumulate advantage-weighted CE grad;
+# mean the grad over the batch; Adam step; update the EMA baseline AFTER the step
+# (so a step's advantages use the average of PRIOR rewards). Returns mean reward of
+# the last step.
+fn rl_train(steps, batch, lr, log_every): i64 {
+    var invB = f64_div(f64_from(1), f64_from(batch));
+    var meanR = f64_from(0);
+    var s = 0;
+    while (s < steps) {
+        pol_zero_grads();
+        var rsum = f64_from(0);
+        var bi = 0;
+        while (bi < batch) {
+            rl_rollout(rl_prompt());
+            var R = rl_reward();
+            var adv = f64_sub(R, g_baseline);
+            rl_backward(adv);                 # accumulate advantage-weighted grad
+            rsum = f64_add(rsum, R);
+            bi = bi + 1;
+        }
+        t_scale(G_E, g_V * g_D, invB);        # mean policy gradient over the batch
+        t_scale(G_W, g_D * g_V, invB);
+        t_scale(G_b, g_V, invB);
+        pol_adam_step(lr);
+        meanR = f64_mul(rsum, invB);
+        g_baseline = f64_add(f64_mul(RL_BETA(), g_baseline),
+                             f64_mul(f64_sub(f64_from(1), RL_BETA()), meanR));
+        s = s + 1;
+    }
+    return meanR;
+}
+
+# mean reward over nroll fresh on-policy rollouts (no gradient) — the policy's
+# current target-token sample frequency (the demonstrable RL metric).
+fn rl_eval(nroll): i64 {
+    var sum = f64_from(0);
+    var k = 0;
+    while (k < nroll) {
+        rl_rollout(rl_prompt());
+        sum = f64_add(sum, rl_reward());
+        k = k + 1;
+    }
+    return f64_div(sum, f64_from(nroll));
+}
