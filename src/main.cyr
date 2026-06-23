@@ -1,0 +1,21 @@
+# tarka — main entry point
+# Stdlib + rosnet/tyche auto-included via cyrius.cyml.
+#
+# M0 (scaffold) stub: prints the project identity + the dep-wiring banner so the
+# build is exercised end-to-end. The RL/reasoning surface lands at M1 (REINFORCE
+# migration). See docs/development/roadmap.md and docs/adr/0001-*.md.
+
+fn main(): i64 {
+    alloc_init();
+    println("tarka — sovereign reasoning & reinforcement-learning reference (Cyrius)");
+    println("the agency counterpoint to attn11 — see docs/adr/0001 for scope");
+    println("M0 scaffold: no RL surface yet (M1 = REINFORCE migration)");
+    return 0;
+}
+
+# Split declaration from the call so main() runs as a bare assignment statement
+# (PARSE_PROG), not a module-scope `var r = main()` initializer — the latter would
+# run before the argv init-stack capture on agnos and read argc()==0. Mirrors attn11.
+var r = 0;
+r = main();
+syscall(SYS_EXIT, r);

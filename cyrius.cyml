@@ -1,0 +1,38 @@
+[package]
+name = "tarka"
+version = "${file:VERSION}"
+description = "tarka — sovereign reasoning & reinforcement-learning reference in Cyrius (the agency counterpoint to attn11)"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.2.36"
+repository = "https://github.com/MacCracken/tarka"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "build/tarka"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math", "args"]
+
+# tarka is a SIBLING consumer of the same f64 tensor substrate attn11 uses, not a
+# chain on top of attn11-the-binary. The policy/value networks reassemble from
+# rosnet's matmul + gradient primitives; on-policy rollout sampling draws from tyche.
+# See docs/adr/0001-tarka-scope-and-rl-migration.md for the boundary rationale and
+# the attn11 REINFORCE migration plan (M1).
+
+# Deterministic statistical PRNG — rollout sampling (on-policy action draws) and
+# weight init. Pinned to 0.1.1 (the pin attn11/rosnet consume).
+[deps.tyche]
+git = "https://github.com/MacCracken/tyche"
+tag = "0.1.1"
+modules = ["dist/tyche.cyr"]
+
+# Dense f64 tensor algebra (the BLAS substrate): storage, BLAS-1, matmul + gradient.
+# tarka's policy/value heads build from these primitives, the same way attn11's
+# transformer does. CPU bundle only (no GPU profile until a GPU milestone).
+# NOTE: rosnet's t_randn calls tyche's rng_normal — the [deps.tyche] above resolves it.
+[deps.rosnet]
+git = "https://github.com/MacCracken/rosnet"
+tag = "0.2.0"
+modules = ["dist/rosnet.cyr"]
