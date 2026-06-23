@@ -79,3 +79,117 @@ fn rm_ppo_step(epochs, lr): i64 {                              # PPO using the l
     }
     return 1;
 }
+
+# ---- OUTCOME reward model (ORM): preferences over WHOLE rollouts -----------------
+# The other half of M3. r_θ is the same head; ORM trains on rollout-level pairs (the
+# whole-trajectory winner ≻ loser by true reward) and the RL reward is the single
+# terminal score R(τ)=Σ_t r_θ — a SPARSE signal the critic/GAE must propagate back.
+# Contrast with PRM's DENSE per-step reward (process supervision; Lightman 2023).
+var OA_st = 0; var OA_ac = 0; var OB_st = 0; var OB_ac = 0;
+fn orm_bufs(): i64 {
+    if (OA_st == 0) { OA_st = t_alloc(g_T); OA_ac = t_alloc(g_T); OB_st = t_alloc(g_T); OB_ac = t_alloc(g_T); }
+    return 0;
+}
+fn rm_sample_to(dst_st, dst_ac): i64 {                         # one rollout -> stored buffers
+    rl_rollout(rl_prompt());
+    var t = 0;
+    while (t < g_T) {
+        store64(dst_st + t*8, load64(R_states + t*8)); store64(dst_ac + t*8, load64(R_actions + t*8));
+        t = t + 1;
+    }
+    return 0;
+}
+fn par_true_reward(st, ac): i64 {                                   # true parity reward of a stored rollout
+    var s = f64_from(0); var t = 0;
+    while (t < g_T) { s = f64_add(s, par_rw(load64(st + t*8), load64(ac + t*8))); t = t + 1; }
+    return s;
+}
+fn rm_train_orm(steps, batch, lr): i64 {
+    orm_bufs();
+    var invB = f64_div(f64_from(1), f64_from(batch));
+    var s = 0;
+    while (s < steps) {
+        rm_zero_grads();
+        var bi = 0;
+        while (bi < batch) {
+            rm_sample_to(OA_st, OA_ac); rm_sample_to(OB_st, OB_ac);
+            var ra = par_true_reward(OA_st, OA_ac); var rb = par_true_reward(OB_st, OB_ac);
+            if (f64_gt(ra, rb) == 1) { rm_backward_pair(OA_st, OA_ac, OB_st, OB_ac, g_T); }
+            elif (f64_gt(rb, ra) == 1) { rm_backward_pair(OB_st, OB_ac, OA_st, OA_ac, g_T); }
+            # tie -> no preference signal this slot
+            bi = bi + 1;
+        }
+        t_scale(G_Er, g_V*g_D, invB); t_scale(G_Wr, g_D*g_V, invB); t_scale(G_br, g_V, invB);
+        rm_adam_step(lr);
+        s = s + 1;
+    }
+    return 0;
+}
+# held-out ORM rollout-pair ranking accuracy (ties excluded from the count).
+fn rm_orm_accuracy(n): i64 {
+    orm_bufs();
+    var ok = 0; var cnt = 0; var k = 0;
+    while (k < n) {
+        rm_sample_to(OA_st, OA_ac); rm_sample_to(OB_st, OB_ac);
+        var ta = par_true_reward(OA_st, OA_ac); var tb = par_true_reward(OB_st, OB_ac);
+        if (f64_gt(ta, tb) == 1) {
+            cnt = cnt + 1;
+            if (f64_gt(rm_score(OA_st, OA_ac, g_T), rm_score(OB_st, OB_ac, g_T)) == 1) { ok = ok + 1; }
+        } elif (f64_gt(tb, ta) == 1) {
+            cnt = cnt + 1;
+            if (f64_gt(rm_score(OB_st, OB_ac, g_T), rm_score(OA_st, OA_ac, g_T)) == 1) { ok = ok + 1; }
+        }
+        k = k + 1;
+    }
+    if (cnt == 0) { return 0; }
+    return (ok * 100) / cnt;                                   # percent
+}
+# RL using the ORM: SPARSE terminal reward R(τ)=Σ r_θ at the last step, 0 elsewhere.
+fn rm_orm_fill(): i64 {
+    var R = rm_score(R_states, R_actions, g_T);
+    var t = 0;
+    while (t < g_T) { store64(R_rewards + t*8, f64_from(0)); t = t + 1; }
+    store64(R_rewards + (g_T - 1)*8, R);
+    return 0;
+}
+fn rm_orm_ppo_step(epochs, lr): i64 {
+    var invT = f64_div(f64_from(1), f64_from(g_T));
+    rl_rollout(rl_prompt());
+    rm_orm_fill(); gae_values(); gae_advantages(); gae_normalize();
+    ppo_snapshot();
+    var e = 0;
+    while (e < epochs) {
+        pol_zero_grads(); val_zero_grads();
+        ppo_backward(); critic_backward(VAL_COEF());
+        m2_scale_grads(invT);
+        pol_adam_step(lr); critic_adam_step(lr);
+        e = e + 1;
+    }
+    return 1;
+}
+
+# ORM's NATURAL consumer: GRPO on the terminal learned reward R(τ)=Σ r_θ. GRPO's
+# group-relative (R−mean)/std normalization cancels the Bradley-Terry reward's
+# unbounded offset/scale — the stability the sparse-GAE PPO path lacks. Returns G
+# rollouts consumed.
+fn rm_orm_grpo_step(G, lr): i64 {
+    var invN = f64_div(f64_from(1), f64_from(G * g_T));
+    var g = 0;
+    while (g < G) {
+        rl_rollout(rl_prompt());
+        var t = 0;
+        while (t < g_T) {
+            var base = (g*g_T + t)*8;
+            var xt = load64(R_states + t*8); var at = load64(R_actions + t*8);
+            store64(GR_states + base, xt); store64(GR_actions + base, at);
+            pol_logits(xt); pol_softmax();
+            store64(GR_oldlp + base, f64_ln(load64(S_probs + at*8)));
+            t = t + 1;
+        }
+        store64(GR_R + g*8, rm_score(R_states, R_actions, g_T));   # LEARNED outcome reward
+        g = g + 1;
+    }
+    grpo_group_adv(G);
+    pol_zero_grads(); grpo_backward(G, invN); pol_adam_step(lr);
+    return G;
+}

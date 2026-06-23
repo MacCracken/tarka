@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-22
+
+**M3 completion — outcome reward model + process-vs-outcome supervision.** 0.4.0 shipped
+the reward-model core + the process (PRM) path; this adds the **outcome reward model
+(ORM)** — the other half of "reward & process-reward models" — and the head-to-head
+comparison (Lightman 2023: process supervision beats outcome supervision).
+
+### Added (`src/bench_m3.cyr`)
+- **ORM** — `r_θ` trained from **whole-rollout** preferences (winner ≻ loser by true
+  reward), consumed by its natural RL: **GRPO** on the terminal reward `R(τ)=Σ r_θ`.
+  GRPO's group-relative (R−mean)/std normalization cancels the Bradley-Terry reward's
+  unbounded additive offset — the stability the sparse-terminal PPO+GAE path lacked
+  (which the diagnostic showed failing to 0.0). Held-out rollout-pair ranking accuracy.
+- **Process-vs-outcome comparison** in the demo: both learned rewards are trained only
+  from preference orderings, then a fresh policy is RL'd on each frozen reward and
+  scored on TRUE reward — **ORM (outcome→GRPO) 13.64/16, PRM (process→PPO) 15.54/16**
+  (both 100% held-out preference accuracy). Process supervision wins at equal budget.
+
+### Note
+- Right RL for the reward shape: per-step (PRM) → PPO+GAE; terminal (ORM) → GRPO. No new
+  gradient math (the Bradley-Terry backward is 0.4.0's, grad-checked); 24/24 still green,
+  lint clean, bench/fuzz compile.
+
 ## [0.4.0] - 2026-06-22
 
 **M3 — learned reward & process-reward models (RLHF substrate).** The hand-coded

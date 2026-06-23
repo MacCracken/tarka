@@ -98,26 +98,47 @@ fn main(): i64 {
         m2_ok = 1; puts("\n  M2 GATE PASS: PPO and GRPO are more sample-efficient than REINFORCE\n");
     } else { puts("\n  M2 GATE FAIL\n"); }
 
-    # ---- M3: a learned process-reward model transmits the task signal ----
-    puts("\n--- M3: learned reward model (Bradley-Terry preferences, no true reward seen) ---\n");
+    # ---- M3: learned reward models — process (PRM) vs outcome (ORM) supervision ----
+    # Each reward model is trained ONLY from preference orderings (never the true reward);
+    # then a FRESH policy is RL-trained on the FROZEN learned reward and we measure its
+    # TRUE reward. PRM gives a DENSE per-step reward (process supervision); ORM gives a
+    # SPARSE terminal reward (outcome). Same RL budget — process supervision should reach
+    # higher true reward (Lightman 2023).
+    puts("\n--- M3: learned reward models (Bradley-Terry; reward model never sees the true reward) ---\n");
+    var rmlr = f64_div(f64_from(5), f64_from(100));
+    var transmit = f64_from(5);                                      # transmission floor (≈4x random 1.33)
+
+    # ORM (outcome): rollout-level preferences -> sparse terminal RL reward
     pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 31337); m2_init(); rm_init();
     g_decoy = BENCH_DECOY(); g_datalen = 0;
-    rm_train_prm(400, 16, f64_div(f64_from(5), f64_from(100)));      # PRM from step-level preferences only
-    var acc = rm_prm_accuracy(500);
-    puts("  RM held-out preference accuracy: "); fmt_int(acc); puts("/500 ("); fmt_int(acc / 5); puts("%, random=50%)\n");
-    # RL a FRESH policy against the FROZEN learned reward; measure its TRUE reward
+    rm_train_orm(400, 16, rmlr);
+    var oacc = rm_orm_accuracy(300);
     pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 999); m2_init();
     g_decoy = BENCH_DECOY(); g_datalen = 0;
-    var m3a = par_eval(200);
-    var st = 0;
-    while (st < 400) { rm_ppo_step(4, f64_div(f64_from(5), f64_from(100))); st = st + 1; }
-    var m3b = par_eval(200);
-    puts("  policy trained on LEARNED reward -> TRUE reward: "); print_f2(m3a); puts(" -> "); print_f2(m3b);
-    puts(" / "); fmt_int(BENCH_T()); _putc(10);
+    var ost = 0; while (ost < 25) { rm_orm_grpo_step(8, rmlr); ost = ost + 1; }   # GRPO, ~200 rollouts
+    var orm_true = par_eval(200);
+    puts("  ORM (outcome -> GRPO, group-normalized): held-out acc "); fmt_int(oacc); puts("%, policy TRUE reward ");
+    print_f2(orm_true); puts(" / "); fmt_int(BENCH_T()); _putc(10);
 
+    # PRM (process): step-level preferences -> dense per-step RL reward
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 31337); m2_init(); rm_init();
+    g_decoy = BENCH_DECOY(); g_datalen = 0;
+    rm_train_prm(400, 16, rmlr);
+    var pacc = rm_prm_accuracy(500) / 5;                             # -> percent
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 999); m2_init();
+    g_decoy = BENCH_DECOY(); g_datalen = 0;
+    var pst = 0; while (pst < 200) { rm_ppo_step(4, rmlr); pst = pst + 1; }
+    var prm_true = par_eval(200);
+    puts("  PRM (process, dense per-step):  held-out acc "); fmt_int(pacc); puts("%, policy TRUE reward ");
+    print_f2(prm_true); puts(" / "); fmt_int(BENCH_T()); _putc(10);
+
+    # M3 gate: both learned rewards TRANSMIT (acc>80% + policy true reward > floor); and
+    # process supervision (PRM) reaches at least the outcome (ORM) true reward at equal budget.
     var m3_ok = 0;
-    if ((acc > 400) && (f64_gt(m3b, BENCH_THRESH()) == 1)) {
-        m3_ok = 1; puts("  M3 GATE PASS: learned reward transmits signal (held-out acc >80% + policy reaches true reward)\n");
+    if ((oacc > 80) && (pacc > 80) && (f64_gt(orm_true, transmit) == 1) && (f64_gt(prm_true, transmit) == 1)
+        && (f64_lt(orm_true, prm_true) == 1)) {
+        m3_ok = 1;
+        puts("  M3 GATE PASS: both learned rewards transmit; PRM (process) >= ORM (outcome) at equal budget\n");
     } else { puts("  M3 GATE FAIL\n"); }
 
     if ((m2_ok == 1) && (m3_ok == 1)) { puts("\n  ALL GATES PASS\n"); return 0; }

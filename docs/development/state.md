@@ -5,15 +5,15 @@
 
 ## Version
 
-**0.4.0** — 2026-06-22. **M3 — learned reward & process-reward models (RLHF substrate).**
-A Bradley-Terry reward model `r_θ(s,a)` learned from **preferences** (own embedding,
-not softmaxed, stable log-sigmoid), in ORM/PRM flavors; adversarially design-reviewed
-(vs Christiano/Ouyang/Lightman) then grad-checked (**24/24**, +5 incl. the BT
-descent-direction falsifier). **Acceptance — non-circular signal transmission:** the RM
-hits **100%** held-out preference accuracy from orderings alone, and a fresh policy RL'd
-on only the **frozen learned** reward reaches **15.52 / 16 true reward**.
-(0.3.0 M2 PPO/GRPO+critic; 0.2.x M1 REINFORCE + akshara; 0.1.0 scaffold.) **M1 closed**
-at attn11 1.11.1.
+**0.4.1** — 2026-06-22. **M3 complete — learned reward & process-reward models.** A
+Bradley-Terry reward model `r_θ(s,a)` from **preferences** (own embedding, not softmaxed,
+stable log-sigmoid), in both **ORM** (outcome, whole-rollout prefs → GRPO) and **PRM**
+(process, step-level prefs → PPO) flavors; design-reviewed (vs Christiano/Ouyang/Lightman)
++ grad-checked (**24/24**). **Non-circular acceptance + process-vs-outcome:** both RMs hit
+**100%** held-out preference accuracy from orderings alone; a fresh policy RL'd on each
+frozen learned reward reaches **PRM 15.54 / ORM 13.64 (of 16)** true reward — process
+supervision wins (Lightman). (0.4.0 = M3 core+PRM; 0.3.0 M2; 0.2.x M1+akshara; 0.1.0
+scaffold.) **M1 closed** at attn11 1.11.1.
 
 ## Toolchain
 
@@ -43,12 +43,15 @@ at attn11 1.11.1.
   acceptance gate met).
 - Demos: count task all three learn (REINFORCE 1.00→24.00, PPO 0.81→23.78, GRPO 0.81→24.00).
 
-**M3 — learned reward / process-reward models — shipped at 0.4.0:**
+**M3 — learned reward / process-reward models — complete (core+PRM 0.4.0, ORM 0.4.1):**
 - `src/m3.cyr` — Bradley-Terry reward model `r_θ(s,a)` (own embedding, not softmaxed,
-  stable log-sigmoid, RM-own Adam; seed `g_r·onehot(a)`). `src/bench_m3.cyr` — PRM from
-  step-level parity preferences + `ppo`-RL on the frozen learned reward.
-- Acceptance: RM held-out preference accuracy **100%** (from orderings only); fresh policy
-  on the learned reward reaches **15.52/16 true reward** (non-circular transmission).
+  stable log-sigmoid, RM-own Adam; seed `g_r·onehot(a)`).
+- `src/bench_m3.cyr` — **PRM** (step-level prefs → PPO, dense per-step reward) **and ORM**
+  (whole-rollout prefs → GRPO, terminal reward; GRPO normalization cancels the BT offset
+  the sparse-PPO path couldn't handle).
+- Acceptance (non-circular + process-vs-outcome): both RMs **100%** held-out preference
+  accuracy from orderings only; fresh policy on each frozen reward reaches **PRM 15.54 /
+  ORM 13.64 (of 16)** true reward — process supervision wins.
 - **Next milestone:** M4 — verifier-guided reasoning (CoT, self-consistency, MCTS).
 
 ## Tests
