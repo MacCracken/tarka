@@ -58,11 +58,14 @@ substrate tarka will grow PPO/critics on anyway.
   own step (with attn11's version bump on the user's tag), not bundled into tarka's
   scaffold. Re-expressing REINFORCE on rosnet is more work than a copy — but it is
   work M2 would force regardless.
-- **Neutral / follow-on** — the **tokenizer-sharing** question is opened, not closed:
-  M1 must choose between extracting attn11's tokenizer to a small shared lib (cleanest
-  long-term; a second consumer justifies it) and vendoring the module into tarka
-  (faster; defers the extraction). GPU execution is explicitly deferred post-1.0,
-  mirroring attn11's M18 sequencing.
+- **Neutral / follow-on** — the **tokenizer-sharing** question is now **resolved
+  (user 2026-06-22): extract to a small shared lib**, not vendor ("extraction for
+  reuse probably best here"). tarka is the concrete second consumer that justifies the
+  carve (the same prove-then-extract doctrine as rosnet/tyche). The lib name is locked:
+  **`akshara`** (अक्षर — the indivisible unit of text/sound; user 2026-06-22), the
+  third attn11 extraction after rosnet/tyche. The carve runs in attn11's 1.x extract/
+  re-fold window; tarka consumes `akshara` rather than re-rolling the tokenizer. GPU execution
+  is explicitly deferred post-1.0, mirroring attn11's M18 sequencing.
 
 ## Alternatives considered
 

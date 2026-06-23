@@ -37,9 +37,11 @@ Direct (declared in `cyrius.cyml`):
 - **[tyche](https://github.com/MacCracken/tyche) 0.1.1** — deterministic PRNG for
   on-policy rollout sampling + weight init. (rosnet's `t_randn` resolves through it.)
 
-**Open dep question (M1):** the byte/BPE tokenizer is currently attn11-internal.
-M1 decides whether it extracts to a small shared lib or tarka vendors the module.
-See ADR 0001 § Consequences.
+**Tokenizer (M1):** the byte/BPE tokenizer is currently attn11-internal. **Decided
+(user 2026-06-22): extract to a small shared lib** ("extraction for reuse"), not
+vendor — tarka is its concrete second consumer, parallels rosnet/tyche. **Lib name
+locked: `akshara`** (अक्षर — the indivisible unit of text/sound; user 2026-06-22) —
+the third attn11 extraction after rosnet/tyche. See ADR 0001 § Consequences.
 
 ## Consumers
 

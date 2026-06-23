@@ -28,7 +28,10 @@ copy of attn11's in-model seeding). On-policy REINFORCE: sample rollouts from th
 current policy, score with a deterministic reward, weight the log-prob gradient by
 the advantage `(R − b)` with an EMA baseline `b`.
 
-- **Dep gate**: tokenizer source decided (extract vs vendor — ADR 0001 §Consequences).
+- **Dep gate**: tokenizer **extracts to a small shared lib** (decided 2026-06-22 —
+  "extraction for reuse"; tarka is the 2nd consumer, parallels rosnet/tyche). **Lib
+  name locked: `akshara`** (अक्षर — indivisible text/sound unit). Carve happens in
+  attn11's 1.x extract/re-fold window; tarka consumes `akshara`.
 - **Acceptance**: the X024 gate reproduces here (target-char frequency rises decisively
   under RL); the REINFORCE backward is grad-checked three ways (RL grad == advantage ×
   AR grad to rounding; FD vs numeric gradient of `advantage × CE`; sign-flip + zero-
