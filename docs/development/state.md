@@ -5,11 +5,12 @@
 
 ## Version
 
-**0.2.1** — 2026-06-22. **akshara wired — tarka consumes the shared tokenizer.**
-Rollout prompts now come from a real tokenized corpus (`corpus_set` + `gd_ld`) instead
-of a synthetic vocab; demo tokenizes 45 B → vocab 28, rewards the space token, freq
-**1.00 → 24.00 / 24**, grad-checks 4/4 green. (0.2.0 = M1 core REINFORCE; 0.1.0 = M0
-scaffold.) **Remaining to close M1:** de-feature attn11's `--objective rl` (its own cut).
+**0.3.0** — 2026-06-22. **M2 — GRPO / PPO + value critic.** The advantage-based RL
+family on the minimal rosnet policy: value critic + GAE + PPO clipped surrogate + GRPO,
+adversarially design-reviewed then grad-checked (**19/19**). **Acceptance met** — on a
+parity control task PPO/GRPO are more sample-efficient than REINFORCE (median rollouts-
+to-threshold: **PPO 32, GRPO 160, REINFORCE 192**). (0.2.1 akshara wired; 0.2.0 M1
+REINFORCE; 0.1.0 scaffold.) **M1 closed** at attn11 1.11.1 (RL migrated here).
 
 ## Toolchain
 
@@ -29,14 +30,16 @@ scaffold.) **Remaining to close M1:** de-feature attn11's `--objective rl` (its 
 
 **M1 closed:** attn11 de-featured `--objective rl` at **attn11 1.11.1** (RL lives here).
 
-**M2 core — actor-critic / PPO / GRPO (in-flight, not yet versioned; 0.3.0 cut pending):**
+**M2 — actor-critic / PPO / GRPO — shipped at 0.3.0:**
 - `src/m2.cyr` — value critic `V(s)=w_v·E[s]+b_v` (shared-E, MSE-regressed), **GAE**
   (γ=0.99 λ=0.95), **PPO** clipped surrogate (frozen π_old, ratio, clip 0.2, multi-epoch
   via `ppo_train`), **GRPO** (group-relative normalized advantage, no critic, `grpo_train`).
   Math adversarially verified (8-agent design workflow) before code; all on rosnet primitives.
-- Demo: all three learn — REINFORCE 1.00→24.00, PPO 0.81→23.78, GRPO 0.81→24.00.
-- **Remaining for M2:** the parity control task + the sample-efficiency benchmark (PPO/GRPO
-  beat REINFORCE on rollouts-to-threshold) — the formal acceptance criterion.
+- `src/bench_m2.cyr` — parity control task + **rollouts-to-threshold** benchmark (median
+  of 5 seeds): **PPO 32, GRPO 160, REINFORCE 192** — PPO/GRPO more sample-efficient (M2
+  acceptance gate met).
+- Demos: count task all three learn (REINFORCE 1.00→24.00, PPO 0.81→23.78, GRPO 0.81→24.00).
+- **Next milestone:** M3 — reward / process-reward models.
 
 ## Tests
 

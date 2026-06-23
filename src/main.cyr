@@ -8,6 +8,7 @@ include "lib/rosnet.cyr"   # linear_fwd / linear_bwd / t_*  (t_randn -> tyche)
 include "lib/akshara.cyr"  # corpus_set / gd_ld / g_char2id / g_datalen  (the tokenizer)
 include "src/rl.cyr"       # the policy + REINFORCE (rl_prompt draws from the corpus)
 include "src/m2.cyr"       # M2: actor-critic, GAE, PPO, GRPO
+include "src/bench_m2.cyr"  # M2 sample-efficiency benchmark (parity task)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -74,16 +75,28 @@ fn main(): i64 {
     var q1 = rl_eval(200);
     puts("  GRPO (group 8, no critic, clip 0.2):   "); print_f2(q0); puts(" -> "); print_f2(q1); _putc(10);
 
-    # gate: all three (REINFORCE, PPO, GRPO) raised the target frequency >=2x
-    var ok = 1;
-    if (f64_gt(r1, f64_mul(r0, f64_from(2))) == 0) { ok = 0; }
-    if (f64_gt(p1, f64_mul(p0, f64_from(2))) == 0) { ok = 0; }
-    if (f64_gt(q1, f64_mul(q0, f64_from(2))) == 0) { ok = 0; }
-    if (ok == 1) {
-        puts("\n  GATE PASS: REINFORCE + PPO + GRPO all raised target frequency >=2x\n");
+    var learn_ok = 1;
+    if (f64_gt(r1, f64_mul(r0, f64_from(2))) == 0) { learn_ok = 0; }
+    if (f64_gt(p1, f64_mul(p0, f64_from(2))) == 0) { learn_ok = 0; }
+    if (f64_gt(q1, f64_mul(q0, f64_from(2))) == 0) { learn_ok = 0; }
+    if (learn_ok == 1) { puts("  (all three learn the count task)\n"); }
+
+    # ---- M2 acceptance: sample-efficiency on the parity task ----
+    puts("\n--- M2 acceptance: rollouts-to-threshold on the parity task (median of 5 seeds) ---\n");
+    var lr = f64_div(f64_from(5), f64_from(100));         # 0.05
+    var rfRoll = bench_median(0, 8, lr);                  # REINFORCE, batch 8
+    var ppRoll = bench_median(1, 4, lr);                  # PPO, 4 epochs
+    var grRoll = bench_median(2, 8, lr);                  # GRPO, group 8
+    puts("  REINFORCE: "); fmt_int(rfRoll); puts(" rollouts to reach mean reward "); print_f2(BENCH_THRESH()); _putc(10);
+    puts("  PPO:       "); fmt_int(ppRoll); puts(" rollouts"); _putc(10);
+    puts("  GRPO:      "); fmt_int(grRoll); puts(" rollouts"); _putc(10);
+
+    # gate: PPO AND GRPO reach the threshold in fewer rollouts than REINFORCE
+    if ((learn_ok == 1) && (ppRoll < rfRoll) && (grRoll < rfRoll)) {
+        puts("\n  GATE PASS: PPO and GRPO are more sample-efficient than REINFORCE\n");
         return 0;
     }
-    puts("\n  GATE FAIL: not all methods learned\n");
+    puts("\n  GATE FAIL: PPO/GRPO did not beat REINFORCE on sample efficiency\n");
     return 1;
 }
 

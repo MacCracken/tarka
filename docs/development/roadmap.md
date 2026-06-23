@@ -45,7 +45,7 @@ the advantage `(R − b)` with an EMA baseline `b`.
 - **Remaining to close M1**: **attn11 side** (separate, user-confirmed): remove
   `--objective rl` + RL surface; attn11 reverts to a pure SFT/diffusion reference.
 
-### M2 — GRPO / PPO + value critic (v0.3.0)
+### M2 — GRPO / PPO + value critic (v0.3.0) — ✅ shipped 2026-06-22
 
 The documented attn11 follow-on, now tarka's. Add a value head (critic), GAE
 advantage estimation, and a clipped surrogate (PPO) / group-relative (GRPO) objective.
@@ -56,8 +56,9 @@ advantage estimation, and a clipped surrogate (PPO) / group-relative (GRPO) obje
   verified (8-agent design workflow vs Schulman/DeepSeek) then **grad-checked: +15 checks,
   19/19 green** (critic FD-exact; GAE recursion==explicit; PPO ρ=1==REINFORCE + clip→0;
   GRPO group-norm + ratio=1==REINFORCE). Demo: all three learn (PPO 0.81→23.78, GRPO →24.00).
-- **Remaining**: the parity control task + the head-to-head **sample-efficiency benchmark**
-  (the acceptance criterion above) → then cut **0.3.0**.
+- **Acceptance ✅**: parity control task + **rollouts-to-threshold** benchmark
+  (`src/bench_m2.cyr`, median of 5 seeds): **PPO 32, GRPO 160, REINFORCE 192** — PPO/GRPO
+  measurably more sample-efficient. Cut at **0.3.0**.
 
 ### M3 — Reward & process-reward models (v0.4.0)
 

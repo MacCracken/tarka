@@ -4,6 +4,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-22
+
+**M2 — GRPO / PPO + value critic.** The advantage-based RL family, the documented
+attn11 follow-on, now tarka's: a value critic, GAE, and clipped-surrogate PPO / GRPO
+on the minimal rosnet policy — all hand-derived, adversarially design-reviewed, and
+finite-difference grad-checked. **Acceptance met:** on a parity control task with
+state-dependent optimal actions, PPO and GRPO are measurably more sample-efficient
+than bare REINFORCE — median **rollouts-to-threshold** (reward 8 / 16, 5 seeds):
+**PPO 32, GRPO 160, REINFORCE 192** (PPO ~6× via per-step GAE credit + multi-epoch
+reuse; GRPO via the group baseline).
+
 ### Added — M2 core: actor-critic, GAE, PPO, GRPO (`src/m2.cyr`)
 - **Value critic** — scalar head `V(s) = w_v·E[s] + b_v` sharing the policy embedding
   (shared-trunk actor-critic), regressed by MSE to the GAE return; built on rosnet
@@ -30,9 +41,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Demo:** on the corpus task all three learn — REINFORCE 1.00→24.00, PPO (critic+GAE+clip)
   0.81→23.78, GRPO (group-8) 0.81→24.00. Build + lint + bench/fuzz clean.
 
-### Remaining in M2 (toward 0.3.0)
-- The parity control task + the head-to-head **sample-efficiency benchmark** (PPO/GRPO
-  measurably beat REINFORCE on rollouts-to-threshold) — the formal M2 acceptance criterion.
+### Added — sample-efficiency benchmark (`src/bench_m2.cyr`)
+- **Parity control task** — reward depends on the state's parity (TGT on even states,
+  DECOY on odd), so the optimal action is state-dependent and per-step credit assignment
+  / sample reuse genuinely pay off. Single-step drivers per method (`par_*_step`) reuse
+  the grad-checked backward; **rollouts-to-threshold**, median over 5 seeds.
+- **Result:** PPO **32** / GRPO **160** / REINFORCE **192** rollouts to reach mean reward
+  8 — PPO and GRPO both more sample-efficient (the M2 acceptance gate). `cyrius test`
+  19/19, lint clean, bench/fuzz compile.
 
 ### Note
 - M1 fully closed: attn11 de-featured `--objective rl` at **attn11 1.11.1** (RL lives here now).
