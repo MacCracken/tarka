@@ -1,0 +1,81 @@
+# tarka — M3 demonstration: a learned process-reward model transmits the task signal.
+#
+# The non-circular acceptance test (per the M3 design review): the reward model is
+# trained ONLY from preference orderings (it never sees the true reward), then a FRESH
+# policy is RL-trained against the FROZEN learned reward, and we measure the policy's
+# TRUE reward. Success = the learned proxy carries enough signal that optimizing it
+# yields a policy that is actually good at the real task.
+#
+# Reuses the parity task from bench_m2.cyr (BENCH_*, par_rw, g_decoy, par_eval) and the
+# PPO machinery from m2.cyr. PROCESS reward model (Lightman-style): step-level
+# preferences (for a state x, the parity-correct action ≻ a wrong action), so r_θ learns
+# the per-(state,action) reward — true process supervision, not a uniform outcome reward.
+# Include after bench_m2.cyr + m3.cyr.
+
+fn RUNI(): i64 { return rng_u64() & 0x7FFFFFFFFFFFFFFF; }       # nonneg random i64
+fn par_correct(x): i64 { if ((x & 1) == 0) { return g_target; } return g_decoy; }   # TGT even / DECOY odd
+fn par_wrong(x): i64 {                                          # any action that is NOT parity-correct
+    var c = par_correct(x);
+    var a = RUNI() % g_V;
+    while (a == c) { a = RUNI() % g_V; }
+    return a;
+}
+
+# ---- train the PROCESS reward model from step-level parity preferences ----------
+# Each pair: winner = (x, parity-correct action), loser = (x, wrong action). Labels come
+# from parity-correctness only — the RM never sees the numeric reward. n=1 (single step).
+var W1 = 0; var W2 = 0; var L1 = 0; var L2 = 0;
+fn rm_train_prm(steps, batch, lr): i64 {
+    if (W1 == 0) { W1 = t_alloc(1); W2 = t_alloc(1); L1 = t_alloc(1); L2 = t_alloc(1); }
+    var invB = f64_div(f64_from(1), f64_from(batch));
+    var s = 0;
+    while (s < steps) {
+        rm_zero_grads();
+        var bi = 0;
+        while (bi < batch) {
+            var x = RUNI() % g_V;
+            store64(W1, x); store64(W2, par_correct(x));       # winner (x, correct)
+            store64(L1, x); store64(L2, par_wrong(x));         # loser  (x, wrong)
+            rm_backward_pair(W1, W2, L1, L2, 1);
+            bi = bi + 1;
+        }
+        t_scale(G_Er, g_V*g_D, invB); t_scale(G_Wr, g_D*g_V, invB); t_scale(G_br, g_V, invB);
+        rm_adam_step(lr);
+        s = s + 1;
+    }
+    return 0;
+}
+
+# held-out PRM preference accuracy (out of n): fraction of fresh (x,correct)≻(x,wrong)
+# pairs the FROZEN r_θ ranks correctly. Random = 50%; the RM never trained on these.
+fn rm_prm_accuracy(n): i64 {
+    var ok = 0; var k = 0;
+    while (k < n) {
+        var x = RUNI() % g_V;
+        if (f64_gt(rm_reward(x, par_correct(x)), rm_reward(x, par_wrong(x))) == 1) { ok = ok + 1; }
+        k = k + 1;
+    }
+    return ok;
+}
+
+# ---- RL the policy against the FROZEN learned reward -----------------------------
+fn rm_prm_fill(): i64 {                                        # R_rewards[t] = r_θ(s_t,a_t) (learned, not par_rw)
+    var t = 0;
+    while (t < g_T) { store64(R_rewards + t*8, rm_reward(load64(R_states+t*8), load64(R_actions+t*8))); t = t + 1; }
+    return 0;
+}
+fn rm_ppo_step(epochs, lr): i64 {                              # PPO using the learned PRM reward (RM frozen)
+    var invT = f64_div(f64_from(1), f64_from(g_T));
+    rl_rollout(rl_prompt());
+    rm_prm_fill(); gae_values(); gae_advantages(); gae_normalize();
+    ppo_snapshot();
+    var e = 0;
+    while (e < epochs) {
+        pol_zero_grads(); val_zero_grads();
+        ppo_backward(); critic_backward(VAL_COEF());
+        m2_scale_grads(invT);
+        pol_adam_step(lr); critic_adam_step(lr);
+        e = e + 1;
+    }
+    return 1;
+}

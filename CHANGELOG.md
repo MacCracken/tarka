@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-22
+
+**M3 — learned reward & process-reward models (RLHF substrate).** The hand-coded
+scalar reward is replaced by a reward model `r_θ(s,a)` learned from **preferences**
+(Bradley-Terry), in outcome (ORM) and process (PRM) flavors — the substrate M4's
+verifier-guided reasoning stands on. Math adversarially design-reviewed (workflow vs
+Christiano/Ouyang/Lightman + tarka conventions) then grad-checked.
+
+### Added — reward model (`src/m3.cyr`)
+- **Bradley-Terry reward model** — `r_θ(s,a) = (E_r[s]·W_r + b_r)[a]`, a self-contained
+  scalar head over its **own** params (separate embedding `E_r`, guaranteeing the demo
+  is non-circular), **not** softmaxed. For a preference pair (winner ≻ loser),
+  `Δ = R(W) − R(L)`, loss `−ln σ(Δ)`; the load-bearing gradient `dL/dΔ = σ(Δ) − 1`
+  gives the per-step seed `g_r·onehot(a)` (single nonzero — distinct from the policy's
+  `(probs−onehot)`), descent raising `r_θ` on the winner / lowering it on the loser.
+- **Numerically-stable** log-sigmoid / softplus (two-branch, no overflow at large \|Δ\|);
+  RM-own Adam (own bias-correction counters, never touches the policy's).
+- **Process supervision** (`src/bench_m3.cyr`) — PRM trained from step-level parity
+  preferences (parity-correct action ≻ wrong action), `ppo`-RL on the **frozen learned**
+  per-step reward.
+
+### Verified
+- **+5 grad-checks (19 → 24, all green):** RM `dWr`/`dbr`/`dEr` Bradley-Terry FD-exact,
+  plus the **descent-direction falsifier** (one BT step must increase Δ — catches a
+  winner/loser sign swap the loss-FD cannot see), with finiteness guards.
+- **Acceptance — non-circular signal transmission:** the RM learns the ordering from
+  preferences alone (held-out preference accuracy **100%**, random 50%, true reward
+  never seen); a **fresh** policy RL-trained against only the frozen learned reward
+  reaches **15.52 / 16 true reward** (1.40 → 15.52). Lint clean, bench/fuzz compile.
+
 ## [0.3.0] - 2026-06-22
 
 **M2 — GRPO / PPO + value critic.** The advantage-based RL family, the documented

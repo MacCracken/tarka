@@ -9,6 +9,8 @@ include "lib/akshara.cyr"  # corpus_set / gd_ld / g_char2id / g_datalen  (the to
 include "src/rl.cyr"       # the policy + REINFORCE (rl_prompt draws from the corpus)
 include "src/m2.cyr"       # M2: actor-critic, GAE, PPO, GRPO
 include "src/bench_m2.cyr"  # M2 sample-efficiency benchmark (parity task)
+include "src/m3.cyr"        # M3: learned reward & process-reward models (Bradley-Terry)
+include "src/bench_m3.cyr"  # M3 transmission demo (learned reward -> RL -> true reward)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -91,12 +93,35 @@ fn main(): i64 {
     puts("  PPO:       "); fmt_int(ppRoll); puts(" rollouts"); _putc(10);
     puts("  GRPO:      "); fmt_int(grRoll); puts(" rollouts"); _putc(10);
 
-    # gate: PPO AND GRPO reach the threshold in fewer rollouts than REINFORCE
+    var m2_ok = 0;
     if ((learn_ok == 1) && (ppRoll < rfRoll) && (grRoll < rfRoll)) {
-        puts("\n  GATE PASS: PPO and GRPO are more sample-efficient than REINFORCE\n");
-        return 0;
-    }
-    puts("\n  GATE FAIL: PPO/GRPO did not beat REINFORCE on sample efficiency\n");
+        m2_ok = 1; puts("\n  M2 GATE PASS: PPO and GRPO are more sample-efficient than REINFORCE\n");
+    } else { puts("\n  M2 GATE FAIL\n"); }
+
+    # ---- M3: a learned process-reward model transmits the task signal ----
+    puts("\n--- M3: learned reward model (Bradley-Terry preferences, no true reward seen) ---\n");
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 31337); m2_init(); rm_init();
+    g_decoy = BENCH_DECOY(); g_datalen = 0;
+    rm_train_prm(400, 16, f64_div(f64_from(5), f64_from(100)));      # PRM from step-level preferences only
+    var acc = rm_prm_accuracy(500);
+    puts("  RM held-out preference accuracy: "); fmt_int(acc); puts("/500 ("); fmt_int(acc / 5); puts("%, random=50%)\n");
+    # RL a FRESH policy against the FROZEN learned reward; measure its TRUE reward
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 999); m2_init();
+    g_decoy = BENCH_DECOY(); g_datalen = 0;
+    var m3a = par_eval(200);
+    var st = 0;
+    while (st < 400) { rm_ppo_step(4, f64_div(f64_from(5), f64_from(100))); st = st + 1; }
+    var m3b = par_eval(200);
+    puts("  policy trained on LEARNED reward -> TRUE reward: "); print_f2(m3a); puts(" -> "); print_f2(m3b);
+    puts(" / "); fmt_int(BENCH_T()); _putc(10);
+
+    var m3_ok = 0;
+    if ((acc > 400) && (f64_gt(m3b, BENCH_THRESH()) == 1)) {
+        m3_ok = 1; puts("  M3 GATE PASS: learned reward transmits signal (held-out acc >80% + policy reaches true reward)\n");
+    } else { puts("  M3 GATE FAIL\n"); }
+
+    if ((m2_ok == 1) && (m3_ok == 1)) { puts("\n  ALL GATES PASS\n"); return 0; }
+    puts("\n  GATE FAIL\n");
     return 1;
 }
 

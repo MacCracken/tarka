@@ -8,6 +8,7 @@ include "lib/rosnet.cyr"
 include "lib/akshara.cyr"
 include "src/rl.cyr"
 include "src/m2.cyr"
+include "src/m3.cyr"
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -68,6 +69,24 @@ fn check_vblock(P, G, n, x, target): i64 {
     }
     return mr;
 }
+# central FD grad of the Bradley-Terry pair loss wrt RM parameter P[idx]
+fn fd_rm(P, idx, stW, acW, stL, acL, n): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS())); var lp = rm_pair_loss(stW, acW, stL, acL, n);
+    store64(P + idx * 8, f64_sub(save, EPS())); var lm = rm_pair_loss(stW, acW, stL, acL, n);
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+fn check_rmblock(P, G, n, stW, acW, stL, acL, sn): i64 {
+    var mr = f64_from(0); var i = 0;
+    while (i < n) {
+        var re = relerr(fd_rm(P, i, stW, acW, stL, acL, sn), load64(G + i * 8));
+        if (f64_gt(re, mr) == 1) { mr = re; }
+        i = i + 1;
+    }
+    return mr;
+}
+
 # central FD grad of the PPO surrogate -L_t wrt parameter P[idx]
 fn fd_ppo(P, idx, x, a, lp_old, A): i64 {
     var save = load64(P + idx * 8);
@@ -244,6 +263,28 @@ fn main() {
     while (gi < g_D * g_V) { var re = relerr(load64(grW + gi*8), load64(G_W + gi*8)); if (f64_gt(re, mrGR) == 1) { mrGR = re; } gi = gi + 1; }
     show("  GRPO ratio=1 vs REINFORCE maxrel = ", mrGR);
     assert(f64_lt(mrGR, TOL_EXACT()), "GRPO ratio=1 seed == advantage-REINFORCE (exact)");
+
+    test_group("M3 reward model — Bradley-Terry FD grad-check + descent direction");
+    pol_init(8, 4, 2, 3, 99); rm_init();       # V=8 D=4, pair length n=2
+    var stW = t_alloc(2); var acW = t_alloc(2); var stL = t_alloc(2); var acL = t_alloc(2);
+    store64(stW + 0*8, 1); store64(stW + 1*8, 3); store64(acW + 0*8, 2); store64(acW + 1*8, 5);
+    store64(stL + 0*8, 0); store64(stL + 1*8, 4); store64(acL + 0*8, 6); store64(acL + 1*8, 1);
+    rm_zero_grads(); rm_backward_pair(stW, acW, stL, acL, 2);   # analytic grads
+    var mrRW = check_rmblock(P_Wr, G_Wr, g_D*g_V, stW, acW, stL, acL, 2);
+    var mrRB = check_rmblock(P_br, G_br, g_V, stW, acW, stL, acL, 2);
+    var mrRE = check_rmblock(P_Er, G_Er, g_V*g_D, stW, acW, stL, acL, 2);
+    show("  RM dWr maxrel = ", mrRW); show("  RM dbr maxrel = ", mrRB); show("  RM dEr maxrel = ", mrRE);
+    assert(f64_lt(mrRW, TOL()), "RM dWr (head) Bradley-Terry FD grad-check");
+    assert(f64_lt(mrRB, TOL()), "RM dbr (bias) Bradley-Terry FD grad-check");
+    assert(f64_lt(mrRE, TOL()), "RM dEr (embedding) Bradley-Terry FD grad-check");
+    # descent-direction falsifier: one BT step must INCREASE Δ = R(W)−R(L) (catches a
+    # gW/gL sign swap that the loss-FD alone cannot see). Guard finiteness first.
+    var d0 = f64_sub(rm_score(stW, acW, 2), rm_score(stL, acL, 2));
+    rm_zero_grads(); rm_backward_pair(stW, acW, stL, acL, 2);
+    rm_adam_step(f64_div(f64_from(1), f64_from(10)));   # lr 0.1
+    var d1 = f64_sub(rm_score(stW, acW, 2), rm_score(stL, acL, 2));
+    assert((f64_is_finite(d0) == 1) && (f64_is_finite(d1) == 1), "RM Δ finite");
+    assert(f64_gt(d1, d0) == 1, "RM Bradley-Terry descent increases Δ (preference direction)");
 
     return assert_summary();
 }

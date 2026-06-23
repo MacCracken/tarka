@@ -5,12 +5,15 @@
 
 ## Version
 
-**0.3.0** — 2026-06-22. **M2 — GRPO / PPO + value critic.** The advantage-based RL
-family on the minimal rosnet policy: value critic + GAE + PPO clipped surrogate + GRPO,
-adversarially design-reviewed then grad-checked (**19/19**). **Acceptance met** — on a
-parity control task PPO/GRPO are more sample-efficient than REINFORCE (median rollouts-
-to-threshold: **PPO 32, GRPO 160, REINFORCE 192**). (0.2.1 akshara wired; 0.2.0 M1
-REINFORCE; 0.1.0 scaffold.) **M1 closed** at attn11 1.11.1 (RL migrated here).
+**0.4.0** — 2026-06-22. **M3 — learned reward & process-reward models (RLHF substrate).**
+A Bradley-Terry reward model `r_θ(s,a)` learned from **preferences** (own embedding,
+not softmaxed, stable log-sigmoid), in ORM/PRM flavors; adversarially design-reviewed
+(vs Christiano/Ouyang/Lightman) then grad-checked (**24/24**, +5 incl. the BT
+descent-direction falsifier). **Acceptance — non-circular signal transmission:** the RM
+hits **100%** held-out preference accuracy from orderings alone, and a fresh policy RL'd
+on only the **frozen learned** reward reaches **15.52 / 16 true reward**.
+(0.3.0 M2 PPO/GRPO+critic; 0.2.x M1 REINFORCE + akshara; 0.1.0 scaffold.) **M1 closed**
+at attn11 1.11.1.
 
 ## Toolchain
 
@@ -39,13 +42,21 @@ REINFORCE; 0.1.0 scaffold.) **M1 closed** at attn11 1.11.1 (RL migrated here).
   of 5 seeds): **PPO 32, GRPO 160, REINFORCE 192** — PPO/GRPO more sample-efficient (M2
   acceptance gate met).
 - Demos: count task all three learn (REINFORCE 1.00→24.00, PPO 0.81→23.78, GRPO 0.81→24.00).
-- **Next milestone:** M3 — reward / process-reward models.
+
+**M3 — learned reward / process-reward models — shipped at 0.4.0:**
+- `src/m3.cyr` — Bradley-Terry reward model `r_θ(s,a)` (own embedding, not softmaxed,
+  stable log-sigmoid, RM-own Adam; seed `g_r·onehot(a)`). `src/bench_m3.cyr` — PRM from
+  step-level parity preferences + `ppo`-RL on the frozen learned reward.
+- Acceptance: RM held-out preference accuracy **100%** (from orderings only); fresh policy
+  on the learned reward reaches **15.52/16 true reward** (non-circular transmission).
+- **Next milestone:** M4 — verifier-guided reasoning (CoT, self-consistency, MCTS).
 
 ## Tests
 
-- `tests/tarka.tcyr` — **grad-check suite, 19/19 green** (M1: 4; M2: +15 — critic dW/db/dE
+- `tests/tarka.tcyr` — **grad-check suite, 24/24 green** (M1: 4; M2: +15 — critic dW/db/dE
   FD-exact; GAE recursion==explicit + return identity; PPO ρ=1==REINFORCE / unclipped FD
-  3e-9 / binding-clip→0; GRPO group-norm anchors + ratio=1==REINFORCE).
+  3e-9 / binding-clip→0; GRPO group-norm anchors + ratio=1==REINFORCE; M3: +5 — RM
+  dWr/dbr/dEr Bradley-Terry FD-exact + descent-direction falsifier).
 - `tests/tarka.bcyr` — benchmark stub (compiles)
 - `tests/tarka.fcyr` — fuzz stub (compiles)
 

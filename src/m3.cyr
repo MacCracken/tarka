@@ -1,0 +1,138 @@
+# tarka — M3: learned reward & process-reward models (Bradley-Terry preferences).
+#
+# Replaces the hand-coded scalar reward (M1/M2 count/parity) with a LEARNED reward
+# model r_θ(s,a), trained from PREFERENCES (Christiano 2017 / Ouyang 2022 RLHF;
+# Lightman 2023 process supervision). The M2 PPO/GRPO then optimizes the FROZEN
+# learned reward. The RM is a self-contained scalar head over its OWN params
+# (E_r V×D, W_r D×V, b_r V) — NOT softmaxed: r_θ(s,a) = (E_r[s]·W_r + b_r)[a], the
+# a-th raw logit. Two flavors share the head:
+#   - ORM (outcome): R(τ) = Σ_t r_θ(s_t,a_t)   — preference over whole rollouts.
+#   - PRM (process): r_θ(s_t,a_t) per step       — preference over single (state,action)s.
+#
+# Bradley-Terry: for winner W ≻ loser L, Δ = R(W) − R(L), loss = −ln σ(Δ). The
+# load-bearing gradient dL/dΔ = σ(Δ)−1; per-step seed g_r = σ(Δ)−1 on W's steps,
+# 1−σ(Δ) on L's (gradient DESCENT raises r_θ on W, lowers on L). The RM is NOT
+# softmaxed, so its seed is g_r·onehot(a) (single nonzero), NOT (probs−onehot).
+# Math adversarially verified (workflow wf_78c60bda) vs RLHF + tarka conventions.
+#
+# Include AFTER rl.cyr + m2.cyr. Uses g_V/g_D/g_T, linear_fwd/linear_bwd, t_*, adam_one.
+
+# ---- RM parameters (own embedding + head; never touches the policy's P_E/P_W) ----
+var P_Er = 0;  var P_Wr = 0;  var P_br = 0;          # embedding V*D, head D*V, bias V
+var G_Er = 0;  var G_Wr = 0;  var G_br = 0;          # grads
+var M_Er = 0;  var V_Er = 0;
+var M_Wr = 0;  var V_Wr = 0;
+var M_br = 0;  var V_br = 0;
+var S_rlogits = 0;  # V   forward logits z_s
+var S_rlog = 0;     # V   backward seed dz_s (separate from forward buffer)
+var S_rdemb = 0;    # D   embedding grad
+var g_rb1t = 0;     # RM-own adam bias-correction powers (NOT the policy's g_b1t/g_b2t)
+var g_rb2t = 0;
+
+fn rm_init(): i64 {
+    P_Er = t_alloc(g_V * g_D); P_Wr = t_alloc(g_D * g_V); P_br = t_alloc(g_V);
+    G_Er = t_alloc(g_V * g_D); G_Wr = t_alloc(g_D * g_V); G_br = t_alloc(g_V);
+    M_Er = t_alloc(g_V * g_D); V_Er = t_alloc(g_V * g_D);
+    M_Wr = t_alloc(g_D * g_V); V_Wr = t_alloc(g_D * g_V);
+    M_br = t_alloc(g_V); V_br = t_alloc(g_V);
+    S_rlogits = t_alloc(g_V); S_rlog = t_alloc(g_V); S_rdemb = t_alloc(g_D);
+    t_randn(P_Er, g_V * g_D, f64_div(f64_from(1), f64_from(10)));
+    t_randn(P_Wr, g_D * g_V, f64_div(f64_from(1), f64_from(10)));
+    t_zero(P_br, g_V);
+    g_rb1t = f64_from(1); g_rb2t = f64_from(1);
+    return 0;
+}
+
+# numerically-stable sigmoid: exp only ever sees a <= 0 argument.
+fn sigma_stable(z): i64 {
+    if (f64_lt(z, f64_from(0)) == 1) {
+        var e = f64_exp(z);                                  # z<0 -> e in (0,1)
+        return f64_div(e, f64_add(f64_from(1), e));
+    }
+    return f64_div(f64_from(1), f64_add(f64_from(1), f64_exp(f64_neg(z))));   # z>=0
+}
+
+# stable Bradley-Terry loss −ln σ(Δ) = softplus(−Δ), two-branch (no overflow).
+fn bt_loss(RA, RB): i64 {
+    var d = f64_sub(RA, RB);
+    if (f64_gt(d, f64_from(0)) == 1) {                        # Δ>0: ln(1+exp(−Δ))
+        return f64_ln(f64_add(f64_from(1), f64_exp(f64_neg(d))));
+    }
+    return f64_add(f64_neg(d), f64_ln(f64_add(f64_from(1), f64_exp(d))));     # Δ<=0: −Δ + ln(1+exp(Δ))
+}
+
+# r_θ forward: z_s = E_r[x]·W_r + b_r (length V); r_θ(x,a) = z_s[a] (raw, not softmaxed).
+fn rm_logits(x): i64 {
+    linear_fwd(P_Er + x * g_D * 8, P_Wr, P_br, S_rlogits, 1, g_D, g_V);
+    return 0;
+}
+fn rm_reward(x, a): i64 { rm_logits(x); return load64(S_rlogits + a * 8); }
+
+# score of an n-step rollout: Σ_{t<n} r_θ(states[t], actions[t]).
+fn rm_score(states, actions, n): i64 {
+    var R = f64_from(0); var t = 0;
+    while (t < n) { R = f64_add(R, rm_reward(load64(states + t*8), load64(actions + t*8))); t = t + 1; }
+    return R;
+}
+
+# forward-only BT loss for a preference pair — the FD grad-check perturbs an RM param
+# and calls this (the param is shared across winner + loser, so both R re-evaluate).
+fn rm_pair_loss(stW, acW, stL, acL, n): i64 {
+    return bt_loss(rm_score(stW, acW, n), rm_score(stL, acL, n));
+}
+
+fn rm_zero_grads(): i64 { t_zero(G_Er, g_V*g_D); t_zero(G_Wr, g_D*g_V); t_zero(G_br, g_V); return 0; }
+
+# accumulate one rollout's RM gradient with a fixed per-step scalar g_r. Seed
+# dz_s = g_r·onehot(a) (single nonzero — the RM is NOT softmaxed), then linear_bwd
+# into the RM's OWN G_Wr/G_br/G_Er.
+fn rm_accum_seed(states, actions, n, g_r): i64 {
+    var t = 0;
+    while (t < n) {
+        var x = load64(states + t*8); var a = load64(actions + t*8);
+        t_zero(S_rlog, g_V);
+        store64(S_rlog + a*8, g_r);
+        linear_bwd(P_Er + x*g_D*8, P_Wr, S_rlog, S_rdemb, G_Wr, G_br, 1, g_D, g_V);
+        t_add_into(G_Er + x*g_D*8, S_rdemb, g_D);
+        t = t + 1;
+    }
+    return 0;
+}
+
+# Bradley-Terry backward for one preference pair (winner ≻ loser), each n steps.
+# gA = σ(Δ)−1 (≤0, descent raises r_θ on the winner); gB = 1−σ(Δ) (≥0, lowers loser).
+fn rm_backward_pair(stW, acW, stL, acL, n): i64 {
+    var RW = rm_score(stW, acW, n);
+    var RL = rm_score(stL, acL, n);
+    var s = sigma_stable(f64_sub(RW, RL));
+    rm_accum_seed(stW, acW, n, f64_sub(s, f64_from(1)));     # gW = σ−1
+    rm_accum_seed(stL, acL, n, f64_sub(f64_from(1), s));     # gL = 1−σ
+    return bt_loss(RW, RL);
+}
+
+# Adam on the RM blocks using the RM's OWN bias-correction powers (never mutate the
+# policy's g_b1t/g_b2t — the RM trains on its own schedule).
+fn rm_adam_one(P, G, M, Vv, n, lr): i64 {
+    var b1 = ADAM_B1(); var b2 = ADAM_B2(); var eps = ADAM_EPS();
+    var bc1 = f64_sub(f64_from(1), g_rb1t);
+    var bc2 = f64_sub(f64_from(1), g_rb2t);
+    var i = 0;
+    while (i < n) {
+        var g = load64(G + i*8);
+        var m = f64_add(f64_mul(b1, load64(M + i*8)), f64_mul(f64_sub(f64_from(1), b1), g));
+        var vv = f64_add(f64_mul(b2, load64(Vv + i*8)), f64_mul(f64_sub(f64_from(1), b2), f64_mul(g, g)));
+        store64(M + i*8, m); store64(Vv + i*8, vv);
+        var step = f64_div(f64_mul(lr, f64_div(m, bc1)), f64_add(f64_sqrt(f64_div(vv, bc2)), eps));
+        store64(P + i*8, f64_sub(load64(P + i*8), step));
+        i = i + 1;
+    }
+    return 0;
+}
+fn rm_adam_step(lr): i64 {
+    g_rb1t = f64_mul(g_rb1t, ADAM_B1());
+    g_rb2t = f64_mul(g_rb2t, ADAM_B2());
+    rm_adam_one(P_Er, G_Er, M_Er, V_Er, g_V*g_D, lr);
+    rm_adam_one(P_Wr, G_Wr, M_Wr, V_Wr, g_D*g_V, lr);
+    rm_adam_one(P_br, G_br, M_br, V_br, g_V, lr);
+    return 0;
+}

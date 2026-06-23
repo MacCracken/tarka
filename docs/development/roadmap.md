@@ -60,10 +60,16 @@ advantage estimation, and a clipped surrogate (PPO) / group-relative (GRPO) obje
   (`src/bench_m2.cyr`, median of 5 seeds): **PPO 32, GRPO 160, REINFORCE 192** — PPO/GRPO
   measurably more sample-efficient. Cut at **0.3.0**.
 
-### M3 — Reward & process-reward models (v0.4.0)
+### M3 — Reward & process-reward models (v0.4.0) — ✅ shipped 2026-06-22
 
 Learned reward models (outcome) and process-reward models (per-step), replacing the
 hand-coded scalar reward — the substrate for verifier-guided reasoning.
+- **Shipped**: `src/m3.cyr` — Bradley-Terry reward model `r_θ(s,a)` (own embedding,
+  stable log-sigmoid), grad-checked (**24/24**, +5 incl. the BT descent-direction
+  falsifier), design-reviewed vs Christiano/Ouyang/Lightman.
+- **Acceptance (non-circular)**: RM held-out preference accuracy **100%** from orderings
+  alone; a fresh policy RL'd on only the frozen learned reward reaches **15.52/16 true
+  reward** (`src/bench_m3.cyr`). Cut at **0.4.0**.
 
 ### M4 — Verifier-guided reasoning (v0.5.0 → v1.0)
 
