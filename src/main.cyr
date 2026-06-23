@@ -11,6 +11,7 @@ include "src/m2.cyr"       # M2: actor-critic, GAE, PPO, GRPO
 include "src/bench_m2.cyr"  # M2 sample-efficiency benchmark (parity task)
 include "src/m3.cyr"        # M3: learned reward & process-reward models (Bradley-Terry)
 include "src/bench_m3.cyr"  # M3 transmission demo (learned reward -> RL -> true reward)
+include "src/bench_m4.cyr"  # M4 verifier-guided reasoning (self-consistency, best-of-N)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -141,7 +142,30 @@ fn main(): i64 {
         puts("  M3 GATE PASS: both learned rewards transmit; PRM (process) >= ORM (outcome) at equal budget\n");
     } else { puts("  M3 GATE FAIL\n"); }
 
-    if ((m2_ok == 1) && (m3_ok == 1)) { puts("\n  ALL GATES PASS\n"); return 0; }
+    # ---- M4: verifier-guided reasoning — deliberation at inference beats single-sample ----
+    puts("\n--- M4: verifier-guided reasoning (deliberation at inference, no extra training) ---\n");
+    m4_setup();                                                  # partial (imperfect) policy + frozen PRM verifier
+    var corr = m4_corr_gate(400);
+    var m4single = m4_method_acc(0, 1, 400, 2000);
+    var sc16 = m4_method_acc(1, 16, 400, 2000);
+    var sc64 = m4_method_acc(1, 64, 400, 2000);
+    puts("  self-consistency (answer acc /1000, random 500): single="); fmt_int(m4single);
+    puts(" -> vote@16="); fmt_int(sc16); puts(" -> vote@64="); fmt_int(sc64); _putc(10);
+    var bmean = m4_bon_reward(0, 16, 400, 2000);
+    var bver  = m4_bon_reward(1, 16, 400, 2000);
+    var borac = m4_bon_reward(2, 16, 400, 2000);
+    puts("  best-of-16 true reward (x100/16): mean-sample="); fmt_int(bmean);
+    puts("  PRM-verifier-selected="); fmt_int(bver); puts("  oracle="); fmt_int(borac); _putc(10);
+
+    # M4 gate: the PRM verifier is useful (corr); self-consistency scales decisively above
+    # single-sample; and verifier best-of-N reranks far above the mean sample, ~matching the oracle.
+    var m4_ok = 0;
+    if ((corr == 1) && (sc64 > m4single + 100) && (sc16 > m4single) && (bver > bmean + 100)) {
+        m4_ok = 1;
+        puts("  M4 GATE PASS: deliberation beats single-sample (SC scales; verifier best-of-N ~ oracle)\n");
+    } else { puts("  M4 GATE FAIL\n"); }
+
+    if ((m2_ok == 1) && (m3_ok == 1) && (m4_ok == 1)) { puts("\n  ALL GATES PASS\n"); return 0; }
     puts("\n  GATE FAIL\n");
     return 1;
 }

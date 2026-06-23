@@ -1,0 +1,129 @@
+# tarka — M4: verifier-guided reasoning at INFERENCE time (the "thinking" half).
+#
+# Uses the trained policy + the M3 learned reward model (verifier) to produce better
+# answers via DELIBERATION, not more training: self-consistency (sample-and-vote) and
+# verifier best-of-N. Design adversarially reviewed (workflow wf_48d6762c) vs the
+# reasoning literature (Wang 2022 self-consistency; Cobbe 2021 best-of-N; Gao 2022
+# overoptimization) + tarka-fit + measurement fairness.
+#
+# THE TASK (a checkable answer over a multi-step parity chain): a rollout is an
+# autoregressive chain x_0=prompt, a_t~π(·|x_t), x_{t+1}=a_t. The ANSWER is the majority
+# parity-class of the realized states; the ORACLE is par_correct(x_0). Under the optimal
+# policy the chain stays in the prompt's parity basin (answer == oracle, 100%); an
+# IMPERFECT policy (PARTIAL training — the single reproducible headroom knob, no
+# temperature) drifts, so single-sample accuracy sits between random (50%) and 1, leaving
+# headroom that voting / verification recover. NOTE (honest scope): parity has per-step-
+# independent reward + deterministic transitions, so it demonstrates OUTCOME-level
+# deliberation (SC + best-of-N) but NOT search — tree search needs a sequential task (later).
+#
+# Include AFTER bench_m3.cyr (uses par_correct/par_true_reward/par_grpo_step, rm_*). New
+# file; touches no existing code (the 24 grad-checks stay byte-identical).
+
+fn M4_V(): i64 { return 12; }
+fn M4_D(): i64 { return 8; }
+fn M4_T(): i64 { return 16; }
+fn M4_TGT(): i64 { return 2; }
+fn M4_DECOY(): i64 { return 3; }
+fn M4_QSTEPS(): i64 { return 15; }     # PARTIAL GRPO steps -> single-sample ~627/1000 (calibrated headroom; fixed)
+
+# answer + oracle (deterministic; no RNG)
+fn m4_oracle(x0): i64 { if ((x0 & 1) == 0) { return M4_TGT(); } return M4_DECOY(); }   # = par_correct(x0)
+fn m4_answer(): i64 {                  # majority parity-class of the realized states
+    var even = 0; var t = 0;
+    while (t < g_T) { if ((load64(R_states + t*8) & 1) == 0) { even = even + 1; } t = t + 1; }
+    if (even * 2 >= g_T) { return M4_TGT(); }       # tie -> TGT (fixed deterministic tiebreak)
+    return M4_DECOY();
+}
+
+# train the imperfect-but-informative policy to `qsteps` partial GRPO steps + the PRM.
+fn m4_setup_q(qsteps): i64 {
+    pol_init(M4_V(), M4_D(), M4_T(), M4_TGT(), 7); m2_init(); rm_init();
+    g_decoy = M4_DECOY(); g_datalen = 0; g_baseline = f64_from(0);
+    var lr = f64_div(f64_from(5), f64_from(100));
+    var s = 0; while (s < qsteps) { par_grpo_step(8, lr); s = s + 1; }         # PARTIAL -> headroom
+    rm_train_prm(400, 16, lr);                                                # the verifier (PRM)
+    return 0;
+}
+fn m4_setup(): i64 { return m4_setup_q(M4_QSTEPS()); }
+
+# ---- inference-time methods (all read the frozen policy + PRM) -------------------
+# self-consistency: majority vote of the chain answer over N rollouts of the same prompt.
+fn m4_sc_answer(p, N): i64 {
+    var tgt = 0; var k = 0;
+    while (k < N) { rl_rollout(p); if (m4_answer() == M4_TGT()) { tgt = tgt + 1; } k = k + 1; }
+    if (tgt * 2 >= N) { return M4_TGT(); }
+    return M4_DECOY();
+}
+# self-consistency answer accuracy (per-mille) at budget N over a FIXED prompt set, with
+# a per-prompt deterministic reseed (every method/budget sees identical prompts + nested
+# samples — the fairness control). method: 0 single-sample, 1 self-consistency.
+fn m4_method_acc(method, N, nprompts, base_seed): i64 {
+    rng_seed(base_seed);
+    var prompts = t_alloc(nprompts);
+    var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
+    var ok = 0;
+    i = 0;
+    while (i < nprompts) {
+        var p = load64(prompts + i*8);
+        rng_seed(base_seed + 100003 * (i + 1));               # per-prompt seed -> samples nested across N
+        var ans = M4_TGT();
+        if (method == 0) { rl_rollout(p); ans = m4_answer(); }
+        else { ans = m4_sc_answer(p, N); }
+        if (ans == m4_oracle(p)) { ok = ok + 1; }
+        i = i + 1;
+    }
+    return (ok * 1000) / nprompts;                            # per-mille (random = 500)
+}
+
+# verifier BEST-OF-N (Cobbe 2021) — the proper metric is the TRUE QUALITY of the SELECTED
+# completion, not an answer accuracy. Over a fixed prompt set, sample N rollouts/prompt
+# and report the mean TRUE reward of: mode 0 = the average sample (single-sample baseline);
+# mode 1 = the rollout the PRM VERIFIER scores highest (rm_score); mode 2 = the rollout
+# with the highest TRUE reward (the ORACLE ceiling). Verifier-best should beat the mean
+# sample and approach the oracle. Returns mean reward × 100 (of T=16).
+fn m4_bon_reward(mode, N, nprompts, base_seed): i64 {
+    rng_seed(base_seed);
+    var prompts = t_alloc(nprompts);
+    var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
+    var total = f64_from(0);
+    i = 0;
+    while (i < nprompts) {
+        var p = load64(prompts + i*8);
+        rng_seed(base_seed + 100003 * (i + 1));
+        var msum = f64_from(0);
+        var bsc = f64_from(0); var tr_v = f64_from(0);        # verifier-selected (by rm_score)
+        var tr_o = f64_from(0);                               # oracle-selected (max true reward)
+        var k = 0;
+        while (k < N) {
+            rl_rollout(p);
+            var sc = rm_score(R_states, R_actions, g_T);      # VERIFIER score (frozen PRM)
+            var tr = par_true_reward(R_states, R_actions);    # TRUE reward (metric/oracle only)
+            msum = f64_add(msum, tr);
+            if ((k == 0) || (f64_gt(sc, bsc) == 1)) { bsc = sc; tr_v = tr; }
+            if ((k == 0) || (f64_gt(tr, tr_o) == 1)) { tr_o = tr; }
+            k = k + 1;
+        }
+        if (mode == 0) { total = f64_add(total, f64_div(msum, f64_from(N))); }
+        elif (mode == 1) { total = f64_add(total, tr_v); }
+        else { total = f64_add(total, tr_o); }
+        i = i + 1;
+    }
+    return f64_to(f64_mul(f64_div(total, f64_from(nprompts)), f64_from(100)));   # mean reward × 100
+}
+
+# verifier-usefulness gate: does the PRM score correlate with answer-correctness?
+# returns 1 if mean rm_score(correct rollouts) > mean rm_score(wrong rollouts).
+fn m4_corr_gate(n): i64 {
+    rng_seed(12345);
+    var sc = f64_from(0); var nc = 0; var sw = f64_from(0); var nw = 0; var k = 0;
+    while (k < n) {
+        var p = rl_prompt(); rl_rollout(p);
+        var s = rm_score(R_states, R_actions, g_T);
+        if (m4_answer() == m4_oracle(p)) { sc = f64_add(sc, s); nc = nc + 1; }
+        else { sw = f64_add(sw, s); nw = nw + 1; }
+        k = k + 1;
+    }
+    if ((nc == 0) || (nw == 0)) { return 1; }
+    if (f64_gt(f64_div(sc, f64_from(nc)), f64_div(sw, f64_from(nw))) == 1) { return 1; }
+    return 0;
+}

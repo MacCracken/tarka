@@ -5,6 +5,14 @@
 
 ## Version
 
+**0.5.0** — 2026-06-22. **M4 (start) — verifier-guided reasoning.** Inference-time
+deliberation on the trained policy + M3 verifier (no extra training): **self-consistency**
+(answer accuracy **627 → 930** over votes N=1→64) and **verifier best-of-N** (PRM reranks
+to true reward **892** vs 530 mean, ~oracle **894**). Design adversarially reviewed
+(Wang/Cobbe/Gao). Additive — 24 grad-checks byte-identical. Opens the v0.5.0→v1.0 arc
+(PRM tree search / MCTS on a sequential task remains). (0.4.x M3; 0.3.0 M2; 0.2.x M1;
+0.1.0 scaffold.) **M1 closed** at attn11 1.11.1.
+
 **0.4.1** — 2026-06-22. **M3 complete — learned reward & process-reward models.** A
 Bradley-Terry reward model `r_θ(s,a)` from **preferences** (own embedding, not softmaxed,
 stable log-sigmoid), in both **ORM** (outcome, whole-rollout prefs → GRPO) and **PRM**
@@ -52,7 +60,16 @@ scaffold.) **M1 closed** at attn11 1.11.1.
 - Acceptance (non-circular + process-vs-outcome): both RMs **100%** held-out preference
   accuracy from orderings only; fresh policy on each frozen reward reaches **PRM 15.54 /
   ORM 13.64 (of 16)** true reward — process supervision wins.
-- **Next milestone:** M4 — verifier-guided reasoning (CoT, self-consistency, MCTS).
+
+**M4 — verifier-guided reasoning (start) — shipped at 0.5.0:**
+- `src/bench_m4.cyr` — inference-time deliberation on the trained policy + M3 verifier
+  (no extra training). Reasoning task = checkable answer over a parity chain; policy made
+  imperfect via partial training (single-sample acc 627/1000). **Self-consistency** scales
+  627→797→**930** (N=1→16→64); **verifier best-of-N** selects true reward **892** vs 530
+  mean, ~matching oracle **894** (near-perfect PRM verifier). Design adversarially reviewed
+  (Wang/Cobbe/Gao). Additive — 24 grad-checks byte-identical.
+- **Remaining for M4 → v1.0:** PRM-guided **tree search / MCTS** on a *sequential* task
+  (parity has no search headroom — outcome-level deliberation only).
 
 ## Tests
 

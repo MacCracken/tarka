@@ -75,11 +75,19 @@ hand-coded scalar reward — the substrate for verifier-guided reasoning.
   transmit; process supervision wins (Lightman 2023). Right RL per reward shape:
   per-step→PPO+GAE, terminal→GRPO (group-norm cancels the BT offset).
 
-### M4 — Verifier-guided reasoning (v0.5.0 → v1.0)
+### M4 — Verifier-guided reasoning (v0.5.0 → v1.0) — 🚧 started 2026-06-22 (0.5.0)
 
 The "thinking" half: multi-step chain-of-thought rollouts, self-consistency
 (sample-and-vote), then verifier-guided search → tree search / MCTS over reasoning
 steps, scored by the M3 reward/process models.
+- **0.5.0 (start) — outcome-level deliberation** (`src/bench_m4.cyr`), adversarially
+  design-reviewed (Wang/Cobbe/Gao): **self-consistency** answer accuracy 627→797→930
+  (votes N=1→16→64); **verifier best-of-N** true reward 892 vs 530 mean, ~oracle 894
+  (near-perfect PRM verifier). Reasoning task = parity-chain answer; policy made
+  imperfect via partial training. Additive (24 grad-checks intact).
+- **Remaining → v1.0**: PRM-guided **tree search / MCTS** on a **sequential** task
+  (parity is per-step-independent → no search headroom; needs a task where pruning bad
+  prefixes early beats best-of-N). That is the path to v1.0.
 
 ## Out of scope (for v1.0)
 

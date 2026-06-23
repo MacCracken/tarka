@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-22
+
+**M4 (start) — verifier-guided reasoning, the "thinking" half.** The trained policy + the
+M3 learned reward model now produce better answers by **deliberating at inference**, no
+extra training: self-consistency scales accuracy **627 → 930** with votes, and a learned
+verifier reranks samples to **near-oracle** quality. This opens the v0.5.0 → v1.0 arc
+(PRM-guided tree search / MCTS on a sequential task is the remaining piece).
+
+### Added — M4 (start): verifier-guided reasoning at inference (`src/bench_m4.cyr`)
+The "thinking" half — the trained policy + the M3 reward model (verifier) now produce
+better answers via **deliberation, not more training**. Design adversarially reviewed
+(workflow vs Wang 2022 / Cobbe 2021 / Gao 2022 + tarka-fit + measurement fairness). All
+in a new file — rl.cyr/m2.cyr/m3.cyr untouched (24 grad-checks byte-identical).
+- **Reasoning task** — a checkable answer over a multi-step parity chain (answer =
+  majority parity-class of the chain's states; oracle = `par_correct(prompt)`). The
+  policy is made imperfect-but-informative by **partial training** (single dial, no
+  temperature), giving single-sample accuracy **627/1000** (headroom for deliberation).
+- **Self-consistency** (Wang 2022, sample-and-vote, no verifier) — answer accuracy
+  **627 → 797 → 930** at vote-budget N = 1 → 16 → 64 (variance reduction; monotone).
+- **Verifier best-of-N** (Cobbe 2021) — the PRM reranks N samples by `rm_score`; the
+  selected rollout's TRUE reward **892** (×100 of 16) vs **530** mean sample, **matching
+  the oracle 894** — the learned verifier is near-perfect (hence no overoptimization dip,
+  as the design review predicted). Fair measurement: fixed prompt set + per-prompt reseed
+  (nested samples across N); strict verifier/oracle separation.
+- **Honest scope**: parity has per-step-independent reward + deterministic transitions, so
+  it demonstrates *outcome-level* deliberation (SC + best-of-N) but NOT search — PRM-guided
+  **tree search / MCTS** needs a *sequential* task (the next M4 sub-milestone, toward v1.0).
+
 ## [0.4.1] - 2026-06-22
 
 **M3 completion — outcome reward model + process-vs-outcome supervision.** 0.4.0 shipped
