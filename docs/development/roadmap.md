@@ -7,8 +7,8 @@
 ## v1.0 criteria
 
 - [ ] Public RL/reasoning API frozen — every exported symbol documented and tested
-- [ ] Every hand-derived backward op finite-difference grad-checked (attn11 discipline)
-- [ ] Benchmarks captured in `docs/benchmarks.md`
+- [x] Every hand-derived backward op finite-difference grad-checked (attn11 discipline) — **24/24**
+- [x] Benchmarks captured in [`docs/benchmarks.md`](../benchmarks.md) (0.9.0)
 - [ ] At least one downstream consumer green
 - [ ] CHANGELOG complete from v0.1.0 onward
 - [x] Security audit pass — [`docs/audit/2026-06-22-audit.md`](../audit/2026-06-22-audit.md) (0.8.0: 0 reachable bugs)
@@ -103,8 +103,11 @@ the remaining versions are about finish quality.
 - **0.8.0 — ✅ security/hardening audit**: 6-dimension find→verify workflow — 0 reachable bugs,
   fail-loud precondition guards (beam/GRPO buffer caps, count knobs) + pin 6.2.37.
   [`docs/audit/2026-06-22-audit.md`](../audit/2026-06-22-audit.md).
-- **0.9.0 — optimization + documentation** updates and additions.
-- **1.0.0 — clean cut**: the v1.0 release (API freeze + the criteria above).
+- **0.9.0 — ✅ optimization + documentation**: [`docs/benchmarks.md`](../benchmarks.md)
+  (v1.0 criterion) + README/getting-started polish + Adam loop-invariant hoist (byte-identical
+  numerics; the demo is rollout/matmul-bound, so no wall-clock change — kept for leanness).
+- **1.0.0 — clean cut**: the v1.0 release. Remaining criteria: public API frozen + documented,
+  ≥1 downstream consumer green, CHANGELOG complete.
 
 ## Out of scope (for v1.0)
 

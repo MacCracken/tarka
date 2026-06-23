@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-22
+
+**Optimization + documentation.** Captures the benchmarks (a v1.0 criterion), polishes the
+docs to reflect the now-built RL→reasoning arc, and lands a clarity-improving optimizer hoist.
+No behavior change — 24/24 grad-checks + all gates byte-identical.
+
+### Added
+- **`docs/benchmarks.md`** — every demo number in one place (REINFORCE; PPO/GRPO
+  sample-efficiency; ORM/PRM reward transmission; self-consistency; verifier best-of-N;
+  PRM-guided beam search at matched compute) with methodology + exact-reproduction notes.
+  Satisfies the v1.0 *"benchmarks captured"* criterion.
+- **Module map** in `docs/guides/getting-started.md` — what each `src/*.cyr` contains, in
+  include/dependency order.
+
+### Changed
+- **`README.md`** — reflects the built arc (REINFORCE → actor-critic → reward models →
+  reasoning incl. beam search), a headline-results table, the audit/benchmarks links, and the
+  akshara tokenizer (was the stale "attn11 checkpoint format" row).
+- **Optimization — loop-invariant hoist in the Adam inner loops** (`adam_one`, `rm_adam_one`):
+  `(1−β1)`/`(1−β2)` are precomputed once instead of every element. Numerics byte-identical
+  (24/24 grad-checks). No wall-clock change on the demo (≈1.8 s) — it is rollout/matmul-bound,
+  not Adam-bound; kept for code leanness/clarity, **not** claimed as a speedup.
+
+### Notes
+- Verified the allocation discipline: every working buffer is allocated once in an `*_init`
+  function and reused — **no per-step allocation churn** in any training/rollout/search loop.
+  Documented in `benchmarks.md` § Performance notes.
+
 ## [0.8.0] - 2026-06-22
 
 **Security / hardening audit (the v1.0 audit gate) + toolchain bump.** A 6-dimension audit

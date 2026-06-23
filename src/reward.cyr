@@ -116,11 +116,13 @@ fn rm_adam_one(P, G, M, Vv, n, lr): i64 {
     var b1 = ADAM_B1(); var b2 = ADAM_B2(); var eps = ADAM_EPS();
     var bc1 = f64_sub(f64_from(1), g_rb1t);
     var bc2 = f64_sub(f64_from(1), g_rb2t);
+    var om1 = f64_sub(f64_from(1), b1);          # (1-β1), (1-β2): loop-invariant — hoisted (0.9.0)
+    var om2 = f64_sub(f64_from(1), b2);
     var i = 0;
     while (i < n) {
         var g = load64(G + i*8);
-        var m = f64_add(f64_mul(b1, load64(M + i*8)), f64_mul(f64_sub(f64_from(1), b1), g));
-        var vv = f64_add(f64_mul(b2, load64(Vv + i*8)), f64_mul(f64_sub(f64_from(1), b2), f64_mul(g, g)));
+        var m = f64_add(f64_mul(b1, load64(M + i*8)), f64_mul(om1, g));
+        var vv = f64_add(f64_mul(b2, load64(Vv + i*8)), f64_mul(om2, f64_mul(g, g)));
         store64(M + i*8, m); store64(Vv + i*8, vv);
         var step = f64_div(f64_mul(lr, f64_div(m, bc1)), f64_add(f64_sqrt(f64_div(vv, bc2)), eps));
         store64(P + i*8, f64_sub(load64(P + i*8), step));

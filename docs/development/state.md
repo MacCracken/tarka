@@ -5,6 +5,14 @@
 
 ## Version
 
+**0.9.0** — 2026-06-22. **Optimization + documentation.** `docs/benchmarks.md` (v1.0
+criterion) captures every demo number with methodology + reproduction; README reflects the
+built arc + a headline-results table + akshara; getting-started gains a module map.
+Optimization: loop-invariant hoist in the Adam inner loops (`(1−β)` precomputed once) —
+byte-identical numerics, no wall-clock change (demo ≈1.8 s is rollout/matmul-bound, not
+Adam-bound; kept for leanness). Verified allocation-clean (all buffers `*_init`-allocated +
+reused, no per-step churn). 24 grad-checks + all gates byte-identical.
+
 **0.8.0** — 2026-06-22. **Security / hardening audit (v1.0 audit gate) + toolchain bump.**
 6-dimension audit workflow (find → adversarially verify reachability): **0 reachable bugs**
 (tarka is memory-safe as called today), and unchecked public-API *preconditions* a future
@@ -133,7 +141,7 @@ is the eventual downstream.)
 
 - **0.7.0 — ✅ done**: PRM-guided beam search (the reasoning arc is closed).
 - **0.8.0 — ✅ done**: security/hardening audit (0 reachable bugs; precondition guards) + pin 6.2.37.
-- **0.9.0** — optimization + documentation updates and additions.
-- **1.0.0** — clean cut (the v1.0 release).
+- **0.9.0 — ✅ done**: benchmarks.md (v1.0 criterion) + doc polish + Adam loop-invariant hoist.
+- **1.0.0** — clean cut (the v1.0 release): API freeze + the remaining v1.0 criteria.
 
 See [`roadmap.md`](roadmap.md).
