@@ -45,6 +45,7 @@ fn target_streak(st, ac): i64 {
 # loser=(x, non-TARGET)). Reuses the reward.cyr Bradley-Terry machinery. Frozen during search.
 var TW1 = 0; var TW2 = 0; var TL1 = 0; var TL2 = 0;
 fn target_wrong(x): i64 {
+    guard(g_V >= 2, "target_wrong: g_V must be >= 2 (rejection loop would not terminate)");
     var a = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V;
     while (a == TARGET()) { a = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V; }
     return a;
@@ -88,6 +89,7 @@ fn pol_argmax(x): i64 {
     return best;
 }
 fn srch_greedy(nprompts, base_seed): i64 {
+    guard(nprompts >= 1, "srch_greedy: nprompts must be >= 1");
     rng_seed(base_seed);
     var prompts = t_alloc(nprompts);
     var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
@@ -107,6 +109,7 @@ fn srch_greedy(nprompts, base_seed): i64 {
 # best-of-N: sample N counted rollouts, select the one the VERIFIER scores highest, report its
 # TRUE target-streak. Per sample: T policy + T PRM forwards.
 fn srch_best_of_n(N, nprompts, base_seed): i64 {
+    guard((N >= 1) && (nprompts >= 1), "srch_best_of_n: N and nprompts must be >= 1");
     rng_seed(base_seed);
     var prompts = t_alloc(nprompts);
     var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
@@ -145,6 +148,11 @@ fn search_init(): i64 {
     return 0;
 }
 fn srch_beam(B, K, nprompts, base_seed): i64 {
+    # hardening (0.8.0): beam/child buffers are fixed at BMAX — a larger B or B*K
+    # would silently overrun the heap; B<1/K<1 underflows the -1 candidate sentinel.
+    guard((B >= 1) && (B <= BMAX()), "srch_beam: B out of range (1..BMAX)");
+    guard((K >= 1) && (B * K <= BMAX() * BMAX()), "srch_beam: B*K exceeds candidate cap (BMAX*BMAX)");
+    guard(nprompts >= 1, "srch_beam: nprompts must be >= 1");
     rng_seed(base_seed);
     var prompts = t_alloc(nprompts);
     var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }

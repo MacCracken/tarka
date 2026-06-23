@@ -84,6 +84,7 @@ fn par_ppo_step(epochs, lr): i64 {                   # per-step GAE advantage + 
     return 1;
 }
 fn par_grpo_step(G, lr): i64 {                        # group-relative baseline, no critic
+    guard((G >= 1) && (G <= GMAX()), "par_grpo_step: group size G out of range (1..GMAX)");
     var invN = f64_div(f64_from(1), f64_from(G * g_T));
     var g = 0;
     while (g < G) {

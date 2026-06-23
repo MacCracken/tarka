@@ -11,7 +11,7 @@
 - [ ] Benchmarks captured in `docs/benchmarks.md`
 - [ ] At least one downstream consumer green
 - [ ] CHANGELOG complete from v0.1.0 onward
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
+- [x] Security audit pass — [`docs/audit/2026-06-22-audit.md`](../audit/2026-06-22-audit.md) (0.8.0: 0 reachable bugs)
 
 ## Milestones
 
@@ -100,7 +100,9 @@ the remaining versions are about finish quality.
   the code (no behavior change; 24/24 grad-checks + all gates unchanged).
 - **0.7.0 — ✅ tree search**: PRM-guided beam search on a genuine-search task (greedy 0.20 /
   best-of-N 4.05 / beam 13.50 of 16 at matched compute). The reasoning arc is closed.
-- **0.8.0 — security / hardening audit** (`docs/audit/`).
+- **0.8.0 — ✅ security/hardening audit**: 6-dimension find→verify workflow — 0 reachable bugs,
+  fail-loud precondition guards (beam/GRPO buffer caps, count knobs) + pin 6.2.37.
+  [`docs/audit/2026-06-22-audit.md`](../audit/2026-06-22-audit.md).
 - **0.9.0 — optimization + documentation** updates and additions.
 - **1.0.0 — clean cut**: the v1.0 release (API freeze + the criteria above).
 

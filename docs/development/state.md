@@ -5,6 +5,14 @@
 
 ## Version
 
+**0.8.0** — 2026-06-22. **Security / hardening audit (v1.0 audit gate) + toolchain bump.**
+6-dimension audit workflow (find → adversarially verify reachability): **0 reachable bugs**
+(tarka is memory-safe as called today), and unchecked public-API *preconditions* a future
+caller could trip into silent heap corruption — now guarded **fail-loud** (`guard()` in
+`rl.cyr`: prints + `SYS_EXIT`). Guards: beam `B≤BMAX`/`B*K≤BMAX²`, GRPO `G≤GMAX`, rejection
+loops `g_V≥2`, count knobs `≥1`. Toolchain pin **6.2.36→6.2.37**. Additive — 24 grad-checks +
+all gates byte-identical. Report: `docs/audit/2026-06-22-audit.md`.
+
 **0.7.0** — 2026-06-22. **Reasoning complete — PRM-guided tree (beam) search where search
 is genuinely necessary.** `src/search.cyr` adds a task that *requires* search (generate a
 leading run of a `TARGET` token the policy never prefers) + PRM-guided beam search to solve
@@ -42,8 +50,8 @@ scaffold.) **M1 closed** at attn11 1.11.1.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.36` (in `cyrius.cyml [package].cyrius`) — matches the
-  installed toolchain; same 6.2.x band attn11/rosnet consume.
+- **Cyrius pin**: `6.2.37` (in `cyrius.cyml [package].cyrius`) — bumped from 6.2.36 at
+  0.8.0; matches the installed toolchain (no drift warning); same 6.2.x band attn11/rosnet consume.
 
 ## Source
 
@@ -124,7 +132,7 @@ is the eventual downstream.)
 ## Next (version plan)
 
 - **0.7.0 — ✅ done**: PRM-guided beam search (the reasoning arc is closed).
-- **0.8.0** — security / hardening audit.
+- **0.8.0 — ✅ done**: security/hardening audit (0 reachable bugs; precondition guards) + pin 6.2.37.
 - **0.9.0** — optimization + documentation updates and additions.
 - **1.0.0** — clean cut (the v1.0 release).
 

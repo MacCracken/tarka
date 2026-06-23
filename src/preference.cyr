@@ -15,6 +15,7 @@
 fn RUNI(): i64 { return rng_u64() & 0x7FFFFFFFFFFFFFFF; }       # nonneg random i64
 fn par_correct(x): i64 { if ((x & 1) == 0) { return g_target; } return g_decoy; }   # TGT even / DECOY odd
 fn par_wrong(x): i64 {                                          # any action that is NOT parity-correct
+    guard(g_V >= 2, "par_wrong: g_V must be >= 2 (rejection loop would not terminate)");
     var c = par_correct(x);
     var a = RUNI() % g_V;
     while (a == c) { a = RUNI() % g_V; }
@@ -173,6 +174,7 @@ fn rm_orm_ppo_step(epochs, lr): i64 {
 # unbounded offset/scale — the stability the sparse-GAE PPO path lacks. Returns G
 # rollouts consumed.
 fn rm_orm_grpo_step(G, lr): i64 {
+    guard((G >= 1) && (G <= GMAX()), "rm_orm_grpo_step: group size G out of range (1..GMAX)");
     var invN = f64_div(f64_from(1), f64_from(G * g_T));
     var g = 0;
     while (g < G) {

@@ -49,6 +49,7 @@ fn reason_setup(): i64 { return reason_setup_q(REASON_STEPS()); }
 # ---- inference-time methods (all read the frozen policy + PRM) -------------------
 # self-consistency: majority vote of the chain answer over N rollouts of the same prompt.
 fn reason_self_consistency(p, N): i64 {
+    guard(N >= 1, "reason_self_consistency: N must be >= 1");
     var tgt = 0; var k = 0;
     while (k < N) { rl_rollout(p); if (reason_answer() == REASON_TGT()) { tgt = tgt + 1; } k = k + 1; }
     if (tgt * 2 >= N) { return REASON_TGT(); }
@@ -58,6 +59,7 @@ fn reason_self_consistency(p, N): i64 {
 # a per-prompt deterministic reseed (every method/budget sees identical prompts + nested
 # samples — the fairness control). method: 0 single-sample, 1 self-consistency.
 fn reason_accuracy(method, N, nprompts, base_seed): i64 {
+    guard((N >= 1) && (nprompts >= 1), "reason_accuracy: N and nprompts must be >= 1");
     rng_seed(base_seed);
     var prompts = t_alloc(nprompts);
     var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
@@ -82,6 +84,7 @@ fn reason_accuracy(method, N, nprompts, base_seed): i64 {
 # with the highest TRUE reward (the ORACLE ceiling). Verifier-best should beat the mean
 # sample and approach the oracle. Returns mean reward × 100 (of T=16).
 fn reason_best_of_n(mode, N, nprompts, base_seed): i64 {
+    guard((N >= 1) && (nprompts >= 1), "reason_best_of_n: N and nprompts must be >= 1");
     rng_seed(base_seed);
     var prompts = t_alloc(nprompts);
     var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }

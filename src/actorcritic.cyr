@@ -318,6 +318,7 @@ fn ppo_train(steps, epochs, lr, log_every): i64 {
 # frozen snapshot, baseline by the group mean, normalized advantage, one clipped
 # update. (Ratio=1 at the single epoch -> group-relative REINFORCE, GRPO's essence.)
 fn grpo_train(steps, G, lr, log_every): i64 {
+    guard((G >= 1) && (G <= GMAX()), "grpo_train: group size G out of range (1..GMAX)");
     var invN = f64_div(f64_from(1), f64_from(G * g_T));
     var meanR = f64_from(0);
     var s = 0;

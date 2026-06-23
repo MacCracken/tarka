@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-22
+
+**Security / hardening audit (the v1.0 audit gate) + toolchain bump.** A 6-dimension audit
+workflow (find → adversarially verify reachability) found **zero reachable bugs** — tarka is
+memory-safe as called today — and a set of unchecked *preconditions* on public functions that
+a future caller could trip into silent heap corruption (Cyrius has no bounds checks). Those
+are now guarded fail-loud. Additive — the 24 grad-checks and all demo gates are byte-identical.
+Full report: [`docs/audit/2026-06-22-audit.md`](docs/audit/2026-06-22-audit.md).
+
+### Changed
+- **Toolchain pin** `cyrius.cyml [package].cyrius` 6.2.36 → **6.2.37** (matches the installed
+  toolchain; build clean, no drift warning, 24/24 grad-checks on the new pin).
+
+### Added — hardening guards (`guard()` in `rl.cyr`: fail-loud, prints + `SYS_EXIT`)
+- `srch_beam` validates `1 ≤ B ≤ BMAX` and `1 ≤ K, B*K ≤ BMAX²` before indexing the fixed
+  beam/candidate buffers (prevents heap overrun + the `K==0` `-1`-sentinel underflow).
+- GRPO group size validated `1 ≤ G ≤ GMAX` in `grpo_train` / `par_grpo_step` /
+  `rm_orm_grpo_step` (prevents `GR_*` overrun + `G==0` divide-by-zero).
+- `par_wrong` / `target_wrong` require `g_V ≥ 2` (the reject-until-different loop would
+  otherwise not terminate).
+- `reason_accuracy` / `reason_best_of_n` / `reason_self_consistency` / `srch_*` require their
+  count args `≥ 1` (`reason_accuracy`'s integer `/nprompts` would otherwise trap).
+
+### Notes
+- `assert` (stdlib) only *prints* on failure and does not stop, so it cannot prevent a
+  subsequent corrupting write — hence the dedicated fail-loud `guard()`.
+- Residual low-risk items (NaN on a `0` count knob in non-search entries; `f64_ln` underflow)
+  are documented as accepted in the audit: they yield NaN, not memory unsafety, and are
+  unreachable from the reference's own usage.
+
 ## [0.7.0] - 2026-06-22
 
 **Reasoning complete — PRM-guided tree (beam) search, where search is genuinely

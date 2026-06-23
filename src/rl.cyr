@@ -20,6 +20,23 @@ var g_D = 0;        # embedding dim
 var g_T = 0;        # rollout length (sampled actions per rollout)
 var g_target = 0;   # reward target token id
 
+# ---- hardening: fail-loud precondition guard (0.8.0 audit) ------------------
+# Cyrius has no bounds checks: an out-of-range store64 silently corrupts the heap.
+# Public entries that index fixed-size buffers (beam width vs BMAX, GRPO group vs
+# GMAX) call guard() to turn a silent overrun into a clear abort. A no-op when the
+# precondition holds (every current call site satisfies them), so demo/tests are
+# byte-identical. (stdlib `assert` only PRINTS, it does not stop — hence this.)
+fn guard(cond, msg): i64 {
+    if (cond == 0) {
+        var n = 0; while (load8(msg + n) != 0) { n = n + 1; }
+        syscall(1, 2, "tarka: precondition violated: ", 30);
+        syscall(1, 2, msg, n);
+        syscall(1, 2, "\n", 1);
+        syscall(SYS_EXIT, 1);
+    }
+    return 0;
+}
+
 # ---- parameters (rosnet f64 tensors; t_alloc = n*8 bytes, f64 per slot) -----
 var P_E = 0;        # embedding   V*D
 var P_W = 0;        # head weight D*V
