@@ -9,6 +9,7 @@ include "lib/akshara.cyr"
 include "src/rl.cyr"
 include "src/actorcritic.cyr"
 include "src/reward.cyr"
+include "src/dpo.cyr"
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -105,6 +106,41 @@ fn gae_explicit(t, dbuf): i64 {
         l = l + 1;
     }
     return A;
+}
+
+# central FD grad of the DPO pair loss wrt POLICY parameter P[idx] (reference frozen)
+fn fd_dpo(P, idx, stW, acW, stL, acL, n, beta): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS())); var lp = dpo_pair_loss(stW, acW, stL, acL, n, beta);
+    store64(P + idx * 8, f64_sub(save, EPS())); var lm = dpo_pair_loss(stW, acW, stL, acL, n, beta);
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+fn check_dpoblock(P, G, np, stW, acW, stL, acL, n, beta): i64 {
+    var mr = f64_from(0); var i = 0;
+    while (i < np) {
+        var re = relerr(fd_dpo(P, i, stW, acW, stL, acL, n, beta), load64(G + i * 8));
+        if (f64_gt(re, mr) == 1) { mr = re; }
+        i = i + 1;
+    }
+    return mr;
+}
+# central FD grad of the KL penalty β·KL(p‖q) wrt POLICY parameter P[idx] (reference frozen)
+fn fd_kl(P, idx, x, beta): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS())); var lp = kl_loss(x, beta);
+    store64(P + idx * 8, f64_sub(save, EPS())); var lm = kl_loss(x, beta);
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+fn check_klblock(P, G, np, x, beta): i64 {
+    var mr = f64_from(0); var i = 0;
+    while (i < np) {
+        var re = relerr(fd_kl(P, i, x, beta), load64(G + i * 8));
+        if (f64_gt(re, mr) == 1) { mr = re; }
+        i = i + 1;
+    }
+    return mr;
 }
 
 fn main() {
@@ -285,6 +321,57 @@ fn main() {
     var d1 = f64_sub(rm_score(stW, acW, 2), rm_score(stL, acL, 2));
     assert((f64_is_finite(d0) == 1) && (f64_is_finite(d1) == 1), "RM Δ finite");
     assert(f64_gt(d1, d0) == 1, "RM Bradley-Terry descent increases Δ (preference direction)");
+
+    test_group("DPO — direct-preference pairwise loss FD grad-check (frozen reference policy)");
+    pol_init(8, 4, 2, 3, 99); dpo_init();          # V=8 D=4, preference-pair length n=2
+    dpo_snapshot();                                # reference policy π_ref = current θ
+    # move θ off the reference so Δ != 0 (a representative, non-degenerate test)
+    rng_seed(123);
+    t_randn(P_E, 8 * 4, f64_div(f64_from(1), f64_from(10)));
+    t_randn(P_W, 4 * 8, f64_div(f64_from(1), f64_from(10)));
+    var dstW = t_alloc(2); var dacW = t_alloc(2); var dstL = t_alloc(2); var dacL = t_alloc(2);
+    store64(dstW + 0*8, 1); store64(dstW + 1*8, 3); store64(dacW + 0*8, 2); store64(dacW + 1*8, 5);
+    store64(dstL + 0*8, 0); store64(dstL + 1*8, 4); store64(dacL + 0*8, 6); store64(dacL + 1*8, 1);
+    var dbeta = DPO_BETA();
+    pol_zero_grads(); dpo_backward_pair(dstW, dacW, dstL, dacL, 2, dbeta);   # analytic grads -> G_W,G_b,G_E
+    var mrDW = check_dpoblock(P_W, G_W, g_D * g_V, dstW, dacW, dstL, dacL, 2, dbeta);
+    var mrDb = check_dpoblock(P_b, G_b, g_V, dstW, dacW, dstL, dacL, 2, dbeta);
+    var mrDE = check_dpoblock(P_E, G_E, g_V * g_D, dstW, dacW, dstL, dacL, 2, dbeta);
+    show("  DPO dW maxrel = ", mrDW); show("  DPO dE maxrel = ", mrDE); show("  DPO db maxrel = ", mrDb);
+    assert(f64_lt(mrDW, TOL()), "DPO dW (head weight) FD grad-check");
+    assert(f64_lt(mrDE, TOL()), "DPO dE (embedding) FD grad-check");
+    assert(f64_lt(mrDb, TOL()), "DPO db (head bias) FD grad-check");
+    # descent-direction falsifier: gradient descent on L=−lnσ(Δ) must INCREASE Δ (raise the
+    # winner's implicit reward over the loser) — catches a winner/loser scale sign swap.
+    var dd0 = dpo_delta(dstW, dacW, dstL, dacL, 2, dbeta);
+    pol_zero_grads(); dpo_backward_pair(dstW, dacW, dstL, dacL, 2, dbeta);
+    pol_adam_step(f64_div(f64_from(1), f64_from(10)));         # lr 0.1
+    var dd1 = dpo_delta(dstW, dacW, dstL, dacL, 2, dbeta);
+    assert((f64_is_finite(dd0) == 1) && (f64_is_finite(dd1) == 1), "DPO Δ finite");
+    assert(f64_gt(dd1, dd0) == 1, "DPO step increases Δ (preference direction)");
+
+    test_group("RLHF KL-to-reference-policy penalty — FD grad-check + pull-to-reference");
+    pol_init(8, 4, 1, 3, 99); dpo_init();          # V=8 D=4
+    dpo_snapshot();                                # reference = current θ
+    rng_seed(321);
+    t_randn(P_E, 8 * 4, f64_div(f64_from(1), f64_from(10)));
+    t_randn(P_W, 4 * 8, f64_div(f64_from(1), f64_from(10)));   # θ now diverges from π_ref -> KL > 0
+    var kx = 2; var kbeta = f64_div(f64_from(1), f64_from(10));    # β = 0.1
+    pol_zero_grads(); kl_backward_state(kx, kbeta);            # analytic grads -> G_W,G_b,G_E
+    var mrKW = check_klblock(P_W, G_W, g_D * g_V, kx, kbeta);
+    var mrKb = check_klblock(P_b, G_b, g_V, kx, kbeta);
+    var mrKE = check_klblock(P_E, G_E, g_V * g_D, kx, kbeta);
+    show("  KL dW maxrel = ", mrKW); show("  KL dE maxrel = ", mrKE); show("  KL db maxrel = ", mrKb);
+    assert(f64_lt(mrKW, TOL()), "KL penalty dW FD grad-check");
+    assert(f64_lt(mrKE, TOL()), "KL penalty dE FD grad-check");
+    assert(f64_lt(mrKb, TOL()), "KL penalty db FD grad-check");
+    # falsifier: a descent step on β·KL pulls the policy TOWARD the reference (KL decreases).
+    var kl0 = kl_div_at(kx);
+    pol_zero_grads(); kl_backward_state(kx, kbeta);
+    pol_adam_step(f64_div(f64_from(1), f64_from(1000)));       # small lr 0.001 (avoid overshoot past KL=0)
+    var kl1 = kl_div_at(kx);
+    assert((f64_is_finite(kl0) == 1) && (f64_is_finite(kl1) == 1), "KL finite");
+    assert(f64_lt(kl1, kl0) == 1, "KL penalty step reduces KL (pulls policy toward reference)");
 
     return assert_summary();
 }

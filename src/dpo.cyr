@@ -1,0 +1,238 @@
+# tarka — direct preference optimization (DPO) + the RLHF KL-to-reference-policy penalty.
+#
+# Both stand on a FROZEN REFERENCE POLICY π_ref — a snapshot of the policy params
+# (P_E/P_W/P_b copied into P_Eref/P_Wref/P_bref by dpo_snapshot). They complete
+# tarka's "owns ALL preference optimization + ALL RL" charter with two pieces it
+# lacked (grep-confirmed absent): the DIRECT preference loss (Rafailov 2023) and
+# the RLHF KL-to-ref penalty (Ouyang 2022 / TRL init_kl_coef). Both are
+# hand-derived and finite-difference-gated (tests/tarka.tcyr).
+#
+# DPO (Rafailov 2023). The implicit reward of a sequence y is
+#   r_θ(y) = β·(log π_θ(y) − log π_ref(y)),
+# and for a preferred y_w over y_l the loss is the SAME Bradley-Terry shape the
+# reward model already uses (reward.cyr bt_loss), reparameterized on the policy:
+#   Δ = β·[ (log π_θ − log π_ref)_w − (log π_θ − log π_ref)_l ],   L = −ln σ(Δ).
+# Load-bearing gradient: dL/dΔ = σ(Δ)−1. Δ depends on θ only through log π_θ
+# (the ref terms are frozen), with coefficient +β on the winner, −β on the loser.
+# Since the existing softmax-CE seed (probs−onehot) computes d(−log π_θ)/dθ, the
+# per-step policy seed is scale·(probs−onehot) with scale = +coef on the winner and
+# −coef on the loser, where coef = β·(1−σ(Δ)). No new backward math — it reuses
+# rl.cyr's policy gradient over rosnet's linear_bwd.
+#
+# RLHF KL penalty (Ouyang 2022). Penalize divergence from the reference at a state:
+# with p = π_θ(·|s), q = π_ref(·|s) (q frozen), loss = β·KL(p‖q) = β·Σ_j p_j(ln p_j − ln q_j).
+# Hand-derived gradient (the Σ_j p_j(δ−p) second term cancels to 0):
+#   dKL/dlogit_k = p_k·(f_k − KL),   f_k = ln p_k − ln q_k,
+# so the policy seed is β·p_k·(f_k − KL). Used as reward shaping r' = r − β·KL to
+# keep an RL-tuned policy close to the reference.
+#
+# Include AFTER rl.cyr (pol_*, S_*, P_*, g_V/g_D) + reward.cyr (sigma_stable, bt_loss).
+
+fn DPO_BETA(): i64 { return f64_div(f64_from(1), f64_from(10)); }     # 0.1 (Rafailov default)
+
+# ---- frozen reference policy (a snapshot of P_E/P_W/P_b) ---------------------
+var P_Eref = 0; var P_Wref = 0; var P_bref = 0;
+var S_reflogits = 0;   # V   reference forward logits
+var S_refprobs  = 0;   # V   softmax(reference logits)
+
+fn dpo_init(): i64 {
+    P_Eref = t_alloc(g_V * g_D); P_Wref = t_alloc(g_D * g_V); P_bref = t_alloc(g_V);
+    S_reflogits = t_alloc(g_V); S_refprobs = t_alloc(g_V);
+    return 0;
+}
+
+# freeze the CURRENT policy as the reference (call once, before DPO / KL-penalty training)
+fn dpo_snapshot(): i64 {
+    t_copy(P_Eref, P_E, g_V * g_D);
+    t_copy(P_Wref, P_W, g_D * g_V);
+    t_copy(P_bref, P_b, g_V);
+    return 0;
+}
+
+# reference logits/softmax — mirrors pol_logits/pol_softmax on the frozen params.
+fn ref_logits(x): i64 {
+    linear_fwd(P_Eref + x * g_D * 8, P_Wref, P_bref, S_reflogits, 1, g_D, g_V);
+    return 0;
+}
+fn ref_softmax(): i64 {
+    var mx = load64(S_reflogits);
+    var v = 1;
+    while (v < g_V) {
+        var lv = load64(S_reflogits + v * 8);
+        if (f64_gt(lv, mx) == 1) { mx = lv; }
+        v = v + 1;
+    }
+    var sum = f64_from(0);
+    v = 0;
+    while (v < g_V) {
+        var e = f64_exp(f64_sub(load64(S_reflogits + v * 8), mx));
+        store64(S_refprobs + v * 8, e);
+        sum = f64_add(sum, e);
+        v = v + 1;
+    }
+    var inv = f64_div(f64_from(1), sum);
+    v = 0;
+    while (v < g_V) {
+        store64(S_refprobs + v * 8, f64_mul(load64(S_refprobs + v * 8), inv));
+        v = v + 1;
+    }
+    return 0;
+}
+
+# log π_θ(a|x) and log π_ref(a|x) for one (state, action).
+fn pol_logp(x, a): i64 { pol_logits(x); pol_softmax(); return f64_ln(load64(S_probs + a * 8)); }
+fn ref_logp(x, a): i64 { ref_logits(x); ref_softmax(); return f64_ln(load64(S_refprobs + a * 8)); }
+
+# Σ_{t<n} log π over a stored (states, actions) sequence — θ and reference variants.
+fn dpo_seqlogp_theta(states, actions, n): i64 {
+    var lp = f64_from(0); var t = 0;
+    while (t < n) { lp = f64_add(lp, pol_logp(load64(states + t*8), load64(actions + t*8))); t = t + 1; }
+    return lp;
+}
+fn dpo_seqlogp_ref(states, actions, n): i64 {
+    var lp = f64_from(0); var t = 0;
+    while (t < n) { lp = f64_add(lp, ref_logp(load64(states + t*8), load64(actions + t*8))); t = t + 1; }
+    return lp;
+}
+
+# DPO implicit-reward margin Δ for a preference pair (winner ≻ loser), each n steps.
+fn dpo_delta(stW, acW, stL, acL, n, beta): i64 {
+    var rw = f64_sub(dpo_seqlogp_theta(stW, acW, n), dpo_seqlogp_ref(stW, acW, n));   # log π_θ(w) − log π_ref(w)
+    var rl = f64_sub(dpo_seqlogp_theta(stL, acL, n), dpo_seqlogp_ref(stL, acL, n));
+    return f64_mul(beta, f64_sub(rw, rl));
+}
+
+# forward-only DPO loss for a pair = −ln σ(Δ) = bt_loss(Δ, 0). The FD grad-check
+# perturbs a POLICY param and calls this (the reference is frozen, so only the θ
+# log-probs move — exactly what the analytic gradient flows into).
+fn dpo_pair_loss(stW, acW, stL, acL, n, beta): i64 {
+    return bt_loss(dpo_delta(stW, acW, stL, acL, n, beta), f64_from(0));
+}
+
+# accumulate one sequence's scaled policy gradient into G_* — the rl.cyr softmax-CE
+# seed (probs − onehot)·scale over rosnet's linear_bwd (no loss return; DPO drives
+# its own scale). Identical body to rl_backward, parameterized over (states,actions,n).
+fn pol_accum_scaled(states, actions, n, scale): i64 {
+    var t = 0;
+    while (t < n) {
+        var x = load64(states + t * 8);
+        var a = load64(actions + t * 8);
+        pol_logits(x); pol_softmax();
+        store64(S_probs + a * 8, f64_sub(load64(S_probs + a * 8), f64_from(1)));   # probs − onehot(a)
+        var v = 0;
+        while (v < g_V) {
+            store64(S_probs + v * 8, f64_mul(load64(S_probs + v * 8), scale));
+            v = v + 1;
+        }
+        linear_bwd(P_E + x * g_D * 8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
+        t_add_into(G_E + x * g_D * 8, S_demb, g_D);
+        t = t + 1;
+    }
+    return 0;
+}
+
+# DPO backward for one preference pair → accumulates into G_E/G_W/G_b. coef = β·(1−σ(Δ));
+# winner seeded with +coef (raise log π_θ(w)), loser with −coef (lower log π_θ(l)).
+# Gradient DESCENT on L = −ln σ(Δ) therefore increases Δ — the preference direction.
+# Returns the pair loss.
+fn dpo_backward_pair(stW, acW, stL, acL, n, beta): i64 {
+    var d = dpo_delta(stW, acW, stL, acL, n, beta);
+    var s = sigma_stable(d);
+    var coef = f64_mul(beta, f64_sub(f64_from(1), s));     # β·(1 − σ(Δ))
+    pol_accum_scaled(stW, acW, n, coef);
+    pol_accum_scaled(stL, acL, n, f64_neg(coef));
+    return bt_loss(d, f64_from(0));
+}
+
+# ---- RLHF KL-to-reference-policy penalty -------------------------------------
+# KL(π_θ(·|x) ‖ π_ref(·|x)) at one state. Side effect: S_probs = p (θ), S_refprobs = q (ref).
+fn kl_div_at(x): i64 {
+    pol_logits(x); pol_softmax();        # S_probs   = p
+    ref_logits(x); ref_softmax();        # S_refprobs = q
+    var kl = f64_from(0); var j = 0;
+    while (j < g_V) {
+        var pj = load64(S_probs + j * 8);
+        var qj = load64(S_refprobs + j * 8);
+        kl = f64_add(kl, f64_mul(pj, f64_sub(f64_ln(pj), f64_ln(qj))));
+        j = j + 1;
+    }
+    return kl;
+}
+
+# forward-only KL penalty β·KL(p‖q) at state x (the FD grad-check target).
+fn kl_loss(x, beta): i64 { return f64_mul(beta, kl_div_at(x)); }
+
+# backward of β·KL(p‖q) at state x → accumulates into G_E/G_W/G_b. Seed
+# dlogit_k = β·p_k·(f_k − KL), f_k = ln p_k − ln q_k (q frozen). Reads p_k before
+# overwriting S_probs[k] with the seed (so no in-place corruption), then linear_bwd.
+fn kl_backward_state(x, beta): i64 {
+    var kl = kl_div_at(x);               # S_probs = p, S_refprobs = q, kl scalar
+    var k = 0;
+    while (k < g_V) {
+        var pk = load64(S_probs + k * 8);
+        var qk = load64(S_refprobs + k * 8);
+        var fk = f64_sub(f64_ln(pk), f64_ln(qk));
+        store64(S_probs + k * 8, f64_mul(beta, f64_mul(pk, f64_sub(fk, kl))));
+        k = k + 1;
+    }
+    linear_bwd(P_E + x * g_D * 8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
+    t_add_into(G_E + x * g_D * 8, S_demb, g_D);
+    return 0;
+}
+
+# ---- DPO training loop (demo) ------------------------------------------------
+# DPO needs only PREFERENCES — no learned reward model, no value critic, no
+# sampler-in-the-loop reward. Each step samples two on-policy rollouts, labels the
+# higher-target-count one the winner, and runs the direct-preference gradient. The
+# policy moves toward preferred continuations while the frozen reference KL-anchors
+# it. Mirrors rm_train_orm's batched structure (reward.cyr).
+var DA_st = 0; var DA_ac = 0; var DB_st = 0; var DB_ac = 0;
+fn dpo_bufs(): i64 {
+    if (DA_st == 0) { DA_st = t_alloc(g_T); DA_ac = t_alloc(g_T); DB_st = t_alloc(g_T); DB_ac = t_alloc(g_T); }
+    return 0;
+}
+fn dpo_sample_to(dst_st, dst_ac): i64 {
+    rl_rollout(rl_prompt());
+    var t = 0;
+    while (t < g_T) {
+        store64(dst_st + t*8, load64(R_states + t*8));
+        store64(dst_ac + t*8, load64(R_actions + t*8));
+        t = t + 1;
+    }
+    return 0;
+}
+fn dpo_count_target(actions): i64 {                 # target-token count of a stored rollout (f64)
+    var c = 0; var t = 0;
+    while (t < g_T) { if (load64(actions + t*8) == g_target) { c = c + 1; } t = t + 1; }
+    return f64_from(c);
+}
+fn dpo_train(steps, batch, lr): i64 {
+    dpo_bufs();
+    var invB = f64_div(f64_from(1), f64_from(batch));
+    var s = 0;
+    while (s < steps) {
+        pol_zero_grads();
+        var used = 0; var nb = 0;
+        while (nb < batch) {
+            dpo_sample_to(DA_st, DA_ac); dpo_sample_to(DB_st, DB_ac);
+            var ra = dpo_count_target(DA_ac); var rb = dpo_count_target(DB_ac);
+            if (f64_gt(ra, rb) == 1) { dpo_backward_pair(DA_st, DA_ac, DB_st, DB_ac, g_T, DPO_BETA()); used = used + 1; }
+            elif (f64_gt(rb, ra) == 1) { dpo_backward_pair(DB_st, DB_ac, DA_st, DA_ac, g_T, DPO_BETA()); used = used + 1; }
+            # tie -> no preference signal this slot
+            nb = nb + 1;
+        }
+        if (used > 0) {
+            t_scale(G_E, g_V * g_D, invB); t_scale(G_W, g_D * g_V, invB); t_scale(G_b, g_V, invB);
+            pol_adam_step(lr);
+        }
+        s = s + 1;
+    }
+    return 0;
+}
+
+# mean KL(π_θ ‖ π_ref) over n random states — the divergence-from-reference metric.
+fn dpo_mean_kl(n): i64 {
+    var sum = f64_from(0); var k = 0;
+    while (k < n) { sum = f64_add(sum, kl_div_at((rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V)); k = k + 1; }
+    return f64_div(sum, f64_from(n));
+}

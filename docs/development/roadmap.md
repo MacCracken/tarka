@@ -110,6 +110,21 @@ the remaining versions are about finish quality.
   downstream consumer green ([`examples/quickstart.cyr`](../../examples/quickstart.cyr)),
   CHANGELOG complete. **All six v1.0 criteria met — tarka is v1.0.**
 
+## Post-1.0 (shipped)
+
+- **1.1.0 — ✅ alignment: DPO + RLHF KL-to-reference-policy penalty** (`src/dpo.cyr`). Two
+  charter-owned pieces tarka lacked, both over a frozen reference policy, both hand-derived +
+  FD-grad-checked (suite **24/24 → 34/34**), both additive to the frozen 1.x API.
+  - **DPO** (Rafailov 2023): reparametrize the Bradley-Terry loss onto the policy —
+    `Δ = β·[(log π_θ − log π_ref)_w − (...)_l]`, `L = −ln σ(Δ)`, β=0.1. Reuses `reward.cyr`'s
+    `bt_loss` + `rl.cyr`'s softmax-CE seed; no reward model / critic / sampler. Demo: target
+    frequency **0.94 → 24.00 / 24** from preferences alone.
+  - **KL-to-reference penalty** (Ouyang 2022 / TRL `init_kl_coef`): `β·KL(π_θ‖π_ref)`,
+    `dKL/dlogit_k = p_k·(f_k − KL)`. Demo: pulls mean KL **3.33 → 2.46**.
+  - Surfaced by the 2026-06-25 ifran/secureyeoman product-mining (both ship DPO/RLHF as Python
+    wrappers — demand evidence). Follow-ons not yet evidenced/built: IPO/KTO direct-preference
+    variants.
+
 ## Out of scope (for v1.0)
 
 - **The transformer itself** — that's attn11/rosnet. tarka consumes the policy

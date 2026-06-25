@@ -5,6 +5,17 @@
 
 ## Version
 
+**1.1.0** — Unreleased. **Alignment from preferences — DPO + the RLHF KL-to-reference-policy
+penalty** (`src/dpo.cyr`), both over a FROZEN reference policy (`dpo_snapshot`). DPO reparametrizes
+the Bradley-Terry loss onto the policy (`Δ = β·[(log π_θ − log π_ref)_w − (...)_l]`, `L = −ln σ(Δ)`,
+β=0.1; Rafailov 2023) — reuses `reward.cyr`'s `bt_loss` and `rl.cyr`'s softmax-CE seed, no reward
+model / critic / sampler. The KL penalty `β·KL(π_θ‖π_ref)` (Ouyang 2022; `dKL/dlogit_k = p_k·(f_k−KL)`)
+pulls a diverged policy back to the reference. Demo: DPO raises target freq **0.94 → 24.00 / 24** from
+preferences alone; KL penalty pulls mean KL **3.33 → 2.46**. Both hand-derived backwards FD-grad-checked
++ descent-direction falsifiers; suite **24/24 → 34/34**. Additive — the frozen v1.0 surface unchanged,
+all prior gates byte-identical. Surfaced by the 2026-06-25 ifran/secureyeoman product-mining (both
+shell DPO/RLHF to Python — demand evidence, not ported code). Pin 6.2.37.
+
 **1.0.0** — 2026-06-22. **v1.0 — clean cut; the RL→reasoning reference is complete + frozen.**
 Public API frozen + documented (`docs/api.md`: stable 1.x surface, internal mechanism
 out-of-freeze) and a downstream consumer green (`examples/quickstart.cyr` — REINFORCE via the

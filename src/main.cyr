@@ -10,6 +10,7 @@ include "src/rl.cyr"       # the policy + REINFORCE (rl_prompt draws from the co
 include "src/actorcritic.cyr"       # actor-critic: value critic, GAE, PPO, GRPO
 include "src/parity.cyr"  # actor-critic sample-efficiency benchmark (parity task)
 include "src/reward.cyr"        # reward-model: learned reward & process-reward models (Bradley-Terry)
+include "src/dpo.cyr"           # DPO (direct preference optimization) + RLHF KL-to-reference-policy penalty
 include "src/preference.cyr"  # reward-model transmission demo (learned reward -> RL -> true reward)
 include "src/reasoning.cyr"  # verifier-guided reasoning (self-consistency, best-of-N)
 include "src/search.cyr"     # PRM-guided tree (beam) search on a sequential task
@@ -195,7 +196,45 @@ fn main(): i64 {
         puts("  search GATE PASS: PRM-guided beam >> best-of-N >> greedy at matched-or-lower compute\n");
     } else { puts("  search GATE FAIL\n"); }
 
-    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1)) {
+    # ---- alignment: DPO (preferences only) + RLHF KL-to-reference-policy penalty ----
+    # DPO aligns the policy from PREFERENCES ALONE — no reward model, no value critic, no
+    # sampler-in-the-loop reward: each step prefers the higher-target-count rollout while the
+    # FROZEN reference KL-anchors the policy (Rafailov 2023). The KL-to-reference penalty
+    # (Ouyang 2022) then explicitly pulls a diverged policy back toward that reference.
+    puts("\n--- alignment: DPO (preferences only, frozen reference) + RLHF KL-to-reference penalty ---\n");
+    pol_init(V, D, T, target, 4242); dpo_init();
+    dpo_snapshot();                                       # reference policy = initial policy
+    var a0 = rl_eval(200);
+    dpo_train(300, 16, f64_div(f64_from(5), f64_from(100)));   # 300 steps, batch 16, lr 0.05
+    var a1 = rl_eval(200);
+    var kl_b = dpo_mean_kl(64);                           # how far DPO moved the policy from the reference
+    puts("  DPO (preferences only): target freq "); print_f2(a0); puts(" -> "); print_f2(a1);
+    puts("  (mean KL to reference "); print_f2(kl_b); puts(")"); _putc(10);
+
+    # KL-to-reference penalty: gradient-descend β·KL(π_θ‖π_ref) to pull the policy back.
+    var kstep = 0;
+    while (kstep < 60) {
+        pol_zero_grads();
+        var kj = 0;
+        while (kj < V) { kl_backward_state(kj, DPO_BETA()); kj = kj + 1; }   # penalty over every state
+        var invV = f64_div(f64_from(1), f64_from(V));
+        t_scale(G_E, V * D, invV); t_scale(G_W, D * V, invV); t_scale(G_b, V, invV);
+        pol_adam_step(f64_div(f64_from(5), f64_from(100)));
+        kstep = kstep + 1;
+    }
+    var kl_a = dpo_mean_kl(64);
+    puts("  KL-to-reference penalty: mean KL "); print_f2(kl_b); puts(" -> "); print_f2(kl_a);
+    puts("  (policy pulled back toward reference)"); _putc(10);
+
+    # alignment gate: DPO raises target frequency from preferences alone (>= 1.5x), and the
+    # KL penalty measurably reduces divergence from the reference.
+    var align_ok = 0;
+    if ((f64_gt(a1, f64_mul(a0, f64_div(f64_from(3), f64_from(2)))) == 1) && (f64_lt(kl_a, kl_b) == 1)) {
+        align_ok = 1;
+        puts("  alignment GATE PASS: DPO aligns from preferences; KL penalty pulls policy to reference\n");
+    } else { puts("  alignment GATE FAIL\n"); }
+
+    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (align_ok == 1)) {
         puts("\n  ALL GATES PASS\n"); return 0;
     }
     puts("\n  GATE FAIL\n");

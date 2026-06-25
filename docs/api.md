@@ -1,4 +1,4 @@
-# tarka — Public API (frozen at v1.0.0)
+# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0)
 
 > Satisfies the v1.0 criterion *"Public RL/reasoning API frozen — every exported symbol
 > documented and tested."*
@@ -6,9 +6,11 @@
 ## Freeze policy
 
 The **stable public API** below is frozen for the 1.x series: signatures and semantics will not
-change without a major version bump. Each symbol is exercised by the demo (`src/main.cyr`), the
-grad-check suite (`tests/tarka.tcyr`, 24/24), and/or the quickstart consumer
-(`examples/quickstart.cyr`) — noted per row.
+change without a major version bump. Minor versions may **add** symbols (v1.1.0 added the
+alignment surface in `src/dpo.cyr` — DPO + the RLHF KL penalty — without touching any existing
+signature). Each symbol is exercised by the demo (`src/main.cyr`), the grad-check suite
+(`tests/tarka.tcyr`, 34/34), and/or the quickstart consumer (`examples/quickstart.cyr`) — noted
+per row.
 
 **Not frozen (internal):** the per-element optimizer internals (`adam_one`, `*_adam_step`),
 gradient accumulators / zeroers (`*_zero_grads`, `*_backward`, `gae_*`, `ppo_snapshot`,
@@ -54,6 +56,28 @@ reused — see [`benchmarks.md`](benchmarks.md) § Performance notes.
 | `rm_prm_accuracy(n)` / `rm_orm_accuracy(n)` → i64 | held-out preference accuracy | demo |
 | `rm_ppo_step(epochs, lr)` / `rm_orm_grpo_step(G, lr)` | one RL step against the frozen learned reward (PRM→PPO / ORM→GRPO) | demo |
 | `par_correct(x)` / `par_true_reward(st, ac)` | the parity-task oracle (true reward, never shown to the RM) | demo, suite |
+
+## Alignment: DPO + RLHF KL penalty — `src/dpo.cyr` (added v1.1.0, additive)
+
+Direct preference optimization and the RLHF KL-to-reference-policy penalty, both evaluated
+against a **frozen reference policy** (`dpo_snapshot`). Both hand-derived backwards are
+finite-difference grad-checked (`tests/tarka.tcyr`).
+
+| symbol | purpose | tested by |
+|--------|---------|-----------|
+| `dpo_init()` | allocate the frozen reference-policy buffers (call after `pol_init`) | demo, suite |
+| `dpo_snapshot()` | freeze the current policy as the reference π_ref | demo, suite |
+| `dpo_train(steps, batch, lr)` | DPO training from sampled preferences (higher-reward rollout = winner) | demo |
+| `dpo_backward_pair(stW, acW, stL, acL, n, beta)` → f64 | one preference pair's DPO gradient (returns the loss) | demo, suite |
+| `dpo_pair_loss(stW, acW, stL, acL, n, beta)` → f64 / `dpo_delta(...)` → f64 | forward-only DPO loss −ln σ(Δ) / the implicit-reward margin Δ | suite |
+| `kl_backward_state(x, beta)` | accumulate the β·KL(π_θ‖π_ref) penalty gradient at state `x` | demo, suite |
+| `kl_loss(x, beta)` → f64 / `kl_div_at(x)` → f64 | forward KL penalty / raw KL at a state | demo, suite |
+| `dpo_mean_kl(n)` → f64 | mean KL to the reference over `n` random states | demo |
+| `pol_logp(x, a)` / `ref_logp(x, a)` → f64 | policy / reference log-prob of an action | suite |
+| `DPO_BETA()` | the DPO / penalty temperature β (0.1) | demo, suite |
+
+**Not frozen (internal mechanism):** `pol_accum_scaled`, `dpo_seqlogp_theta`/`dpo_seqlogp_ref`,
+`ref_logits`/`ref_softmax`, `dpo_bufs`/`dpo_sample_to`/`dpo_count_target`.
 
 ## Parity task + sample-efficiency benchmark — `src/parity.cyr`
 

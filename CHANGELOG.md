@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] - Unreleased
+
+**Alignment from preferences — DPO + the RLHF KL-to-reference-policy penalty.** Two
+charter-owned-but-unbuilt pieces (tarka "owns ALL preference optimization + ALL RL"), both
+hand-derived and finite-difference grad-checked, both **additive** to the frozen 1.x API.
+Surfaced by the 2026-06-25 ifran/secureyeoman product-mining (the products carry DPO/RLHF only
+as Python wrappers — demand evidence; a grep confirmed neither was built in tarka).
+
+### Added
+- **DPO (Direct Preference Optimization)** — `src/dpo.cyr`. The implicit-reward
+  reparameterization of the Bradley-Terry loss onto the **policy** against a FROZEN reference:
+  `Δ = β·[(log π_θ − log π_ref)_w − (log π_θ − log π_ref)_l]`, `L = −ln σ(Δ)` (Rafailov 2023,
+  β = 0.1). Reuses `reward.cyr`'s stable `bt_loss`/`sigma_stable` and `rl.cyr`'s softmax-CE seed
+  — the per-step policy gradient is `scale·(probs − onehot)` with `scale = +β(1−σ(Δ))` on the
+  winner, `−β(1−σ(Δ))` on the loser. No reward model, no value critic, no sampler-in-the-loop reward.
+- **RLHF KL-to-reference-policy penalty** — `src/dpo.cyr`. `β·KL(π_θ ‖ π_ref)` with `q` frozen;
+  hand-derived gradient `dKL/dlogit_k = p_k·(f_k − KL)`, `f_k = ln p_k − ln q_k` (Ouyang 2022 /
+  TRL `init_kl_coef`). Distinct from PPO's `π_old` importance-ratio clip and from the frozen
+  reward model — neither is a reference *policy*.
+- **Frozen reference policy** — `dpo_snapshot()` copies the current policy params;
+  `ref_logits`/`ref_softmax`/`ref_logp` evaluate under it.
+- **DPO demo + alignment gate** — `src/main.cyr`: DPO from preferences alone raises target
+  frequency **0.94 → 24.00 / 24**; the KL-to-reference penalty then pulls mean KL **3.33 → 2.46**.
+- **Grad-checks** — `tests/tarka.tcyr`: DPO pairwise-loss FD grad-check (dW/dE/db; maxrel ≤ 9e-9)
+  + a descent-direction falsifier (a step increases Δ), and the KL-penalty FD grad-check
+  (dW/dE/db; maxrel ≤ 4.0e-6) + a pull-to-reference falsifier (a step reduces KL). Suite **24/24 → 34/34**.
+
+Additive only — the v1.0 public surface is unchanged; all prior gates byte-identical, all prior
+grad-checks intact. Toolchain pin: cyrius 6.2.37.
+
 ## [1.0.0] - 2026-06-22
 
 **v1.0 — the RL → reasoning reference is complete and frozen.** From the assembly up, with no
