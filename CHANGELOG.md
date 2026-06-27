@@ -6,11 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.1.0] - Unreleased
 
-**Alignment from preferences — DPO + the RLHF KL-to-reference-policy penalty.** Two
-charter-owned-but-unbuilt pieces (tarka "owns ALL preference optimization + ALL RL"), both
-hand-derived and finite-difference grad-checked, both **additive** to the frozen 1.x API.
-Surfaced by the 2026-06-25 ifran/secureyeoman product-mining (the products carry DPO/RLHF only
-as Python wrappers — demand evidence; a grep confirmed neither was built in tarka).
+**Alignment from preferences — DPO, IPO, KTO + the RLHF KL-to-reference-policy penalty.** Four
+charter-owned preference-optimization mechanisms (tarka "owns ALL preference optimization + ALL RL"),
+all hand-derived and finite-difference grad-checked, all **additive** to the frozen 1.x API.
+Surfaced by the 2026-06-25 ifran/secureyeoman product-mining (the products carry DPO / RLHF /
+preference losses only as Python wrappers — demand evidence; a grep confirmed none was built in
+tarka). DPO + KL landed first; IPO and KTO complete the standard preference-loss set on the same
+frozen-reference machinery.
 
 ### Added
 - **DPO (Direct Preference Optimization)** — `src/dpo.cyr`. The implicit-reward
@@ -23,13 +25,31 @@ as Python wrappers — demand evidence; a grep confirmed neither was built in ta
   hand-derived gradient `dKL/dlogit_k = p_k·(f_k − KL)`, `f_k = ln p_k − ln q_k` (Ouyang 2022 /
   TRL `init_kl_coef`). Distinct from PPO's `π_old` importance-ratio clip and from the frozen
   reward model — neither is a reference *policy*.
+- **IPO (Identity Preference Optimization)** — `src/preference_ext.cyr`. The ΨPO identity-map loss
+  (Azar et al. 2024): regress the **bare** implicit-reward margin `h = (log π_θ − log π_ref)_w −
+  (…)_l` toward a FINITE target `1/(2β)` via `L = (h − 1/(2β))²`. Unlike DPO's `−ln σ`, the gradient
+  does not vanish as the margin grows — it pulls `h` back if it overshoots. `dL/dh = 2(h − 1/(2β))`;
+  winner seed `−2(h−m)`, loser `+2(h−m)` over the same `pol_accum_scaled` path (reuses `dpo_delta`
+  at β=1 for `h`). Here β is a regularization strength (β=0.5 → target margin 1.0), distinct from
+  DPO's reward-scale β.
+- **KTO (Kahneman-Tversky Optimization)** — `src/preference_ext.cyr`. The UNPAIRED, prospect-theoretic
+  loss (Ethayarajh et al. 2024): each example is labeled desirable/undesirable on its own against a
+  **detached** KL reference point `z`. `L = λ·(1 − σ(u))`, `u = β(ρ − z)` desirable / `β(z − ρ)`
+  undesirable, `ρ = log π_θ − log π_ref`. The gradient coefficient is the prospect-value magnitude
+  `σ(u)(1−σ(u))` (NOT DPO's `1−σ`); descent raises ρ for desirable, lowers it for undesirable. `z`
+  is a constant scalar threaded through forward + backward — its detachment is gated explicitly.
 - **Frozen reference policy** — `dpo_snapshot()` copies the current policy params;
   `ref_logits`/`ref_softmax`/`ref_logp` evaluate under it.
-- **DPO demo + alignment gate** — `src/main.cyr`: DPO from preferences alone raises target
-  frequency **0.94 → 24.00 / 24**; the KL-to-reference penalty then pulls mean KL **3.33 → 2.46**.
+- **Alignment demo + gates** — `src/main.cyr`: DPO from preferences alone raises target frequency
+  **0.94 → 24.00 / 24**; the KL-to-reference penalty pulls mean KL **3.33 → 2.46**; IPO regresses the
+  implicit-reward margin **h 0.00 → 0.59** toward its target 1.0; KTO raises desirable ρ **0.00 →
+  80.31** and lowers undesirable ρ **0.00 → −138.27**.
 - **Grad-checks** — `tests/tarka.tcyr`: DPO pairwise-loss FD grad-check (dW/dE/db; maxrel ≤ 9e-9)
-  + a descent-direction falsifier (a step increases Δ), and the KL-penalty FD grad-check
-  (dW/dE/db; maxrel ≤ 4.0e-6) + a pull-to-reference falsifier (a step reduces KL). Suite **24/24 → 34/34**.
+  + a descent-direction falsifier, the KL-penalty FD grad-check (maxrel ≤ 4.0e-6) + a pull-to-reference
+  falsifier, the IPO squared-margin FD grad-check + a `|h−m|`-decreases (pull-to-margin) falsifier,
+  and the KTO FD grad-check on **both** labels + a two-sided **z-detachment** falsifier (the z-detached
+  FD matches the analytic grad at ~14e-9 while the z-*live* FD diverges to ~9.7) + a direction
+  falsifier (raises desirable ρ, lowers undesirable ρ). Suite **24/24 → 34/34 → 50/50**.
 
 Additive only — the v1.0 public surface is unchanged; all prior gates byte-identical, all prior
 grad-checks intact. Toolchain pin: cyrius 6.2.37.

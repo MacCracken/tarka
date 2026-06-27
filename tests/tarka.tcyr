@@ -10,6 +10,7 @@ include "src/rl.cyr"
 include "src/actorcritic.cyr"
 include "src/reward.cyr"
 include "src/dpo.cyr"
+include "src/preference_ext.cyr"
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -137,6 +138,61 @@ fn check_klblock(P, G, np, x, beta): i64 {
     var mr = f64_from(0); var i = 0;
     while (i < np) {
         var re = relerr(fd_kl(P, i, x, beta), load64(G + i * 8));
+        if (f64_gt(re, mr) == 1) { mr = re; }
+        i = i + 1;
+    }
+    return mr;
+}
+
+# central FD grad of the IPO squared-margin loss wrt POLICY parameter P[idx] (ref frozen)
+fn fd_ipo(P, idx, stW, acW, stL, acL, n, beta): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS())); var lp = ipo_pair_loss(stW, acW, stL, acL, n, beta);
+    store64(P + idx * 8, f64_sub(save, EPS())); var lm = ipo_pair_loss(stW, acW, stL, acL, n, beta);
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+fn check_ipoblock(P, G, np, stW, acW, stL, acL, n, beta): i64 {
+    var mr = f64_from(0); var i = 0;
+    while (i < np) {
+        var re = relerr(fd_ipo(P, i, stW, acW, stL, acL, n, beta), load64(G + i * 8));
+        if (f64_gt(re, mr) == 1) { mr = re; }
+        i = i + 1;
+    }
+    return mr;
+}
+
+# central FD grad of the KTO per-example loss wrt POLICY parameter P[idx], z DETACHED
+# (held constant) — this is exactly the analytic gradient's assumption.
+fn fd_kto(P, idx, st, ac, n, label, beta, lamD, lamU, z): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS())); var lp = kto_example_loss(st, ac, n, label, beta, lamD, lamU, z);
+    store64(P + idx * 8, f64_sub(save, EPS())); var lm = kto_example_loss(st, ac, n, label, beta, lamD, lamU, z);
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+fn check_ktoblock(P, G, np, st, ac, n, label, beta, lamD, lamU, z): i64 {
+    var mr = f64_from(0); var i = 0;
+    while (i < np) {
+        var re = relerr(fd_kto(P, i, st, ac, n, label, beta, lamD, lamU, z), load64(G + i * 8));
+        if (f64_gt(re, mr) == 1) { mr = re; }
+        i = i + 1;
+    }
+    return mr;
+}
+# central FD grad of the KTO LIVE loss (z recomputed from θ) — differentiates THROUGH
+# the reference point; must DIVERGE from the z-detached analytic gradient.
+fn fd_kto_live(P, idx, st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS())); var lp = kto_example_loss_live(st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km);
+    store64(P + idx * 8, f64_sub(save, EPS())); var lm = kto_example_loss_live(st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km);
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+fn check_ktoblock_live(P, G, np, st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km): i64 {
+    var mr = f64_from(0); var i = 0;
+    while (i < np) {
+        var re = relerr(fd_kto_live(P, i, st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km), load64(G + i * 8));
         if (f64_gt(re, mr) == 1) { mr = re; }
         i = i + 1;
     }
@@ -372,6 +428,94 @@ fn main() {
     var kl1 = kl_div_at(kx);
     assert((f64_is_finite(kl0) == 1) && (f64_is_finite(kl1) == 1), "KL finite");
     assert(f64_lt(kl1, kl0) == 1, "KL penalty step reduces KL (pulls policy toward reference)");
+
+    test_group("IPO — identity-preference squared-margin loss FD grad-check (frozen reference policy)");
+    pol_init(8, 4, 2, 3, 99); dpo_init();          # V=8 D=4, preference-pair length n=2
+    dpo_snapshot();                                # reference policy π_ref = current θ
+    rng_seed(123);                                 # move θ off the reference so h != 0
+    t_randn(P_E, 8 * 4, f64_div(f64_from(1), f64_from(10)));
+    t_randn(P_W, 4 * 8, f64_div(f64_from(1), f64_from(10)));
+    var istW = t_alloc(2); var iacW = t_alloc(2); var istL = t_alloc(2); var iacL = t_alloc(2);
+    store64(istW + 0*8, 1); store64(istW + 1*8, 3); store64(iacW + 0*8, 2); store64(iacW + 1*8, 5);
+    store64(istL + 0*8, 0); store64(istL + 1*8, 4); store64(iacL + 0*8, 6); store64(iacL + 1*8, 1);
+    var ibeta = IPO_BETA();
+    pol_zero_grads(); ipo_backward_pair(istW, iacW, istL, iacL, 2, ibeta);   # analytic grads -> G_W,G_b,G_E
+    var mrIW = check_ipoblock(P_W, G_W, g_D * g_V, istW, iacW, istL, iacL, 2, ibeta);
+    var mrIb = check_ipoblock(P_b, G_b, g_V, istW, iacW, istL, iacL, 2, ibeta);
+    var mrIE = check_ipoblock(P_E, G_E, g_V * g_D, istW, iacW, istL, iacL, 2, ibeta);
+    show("  IPO dW maxrel = ", mrIW); show("  IPO dE maxrel = ", mrIE); show("  IPO db maxrel = ", mrIb);
+    assert(f64_lt(mrIW, TOL()), "IPO dW (head weight) FD grad-check");
+    assert(f64_lt(mrIE, TOL()), "IPO dE (embedding) FD grad-check");
+    assert(f64_lt(mrIb, TOL()), "IPO db (head bias) FD grad-check");
+    # IPO-distinguishing falsifier: the gradient regresses h TOWARD the finite target
+    # margin m=1/(2β) (DPO would push h→∞ forever) — a descent step REDUCES |h−m| from
+    # either side. Catches a winner/loser sign swap AND a missing pull-back.
+    var ih0 = ipo_h(istW, iacW, istL, iacL, 2);
+    var im = ipo_target(ibeta);
+    pol_zero_grads(); ipo_backward_pair(istW, iacW, istL, iacL, 2, ibeta);
+    pol_adam_step(f64_div(f64_from(1), f64_from(100)));        # small lr 0.01 (avoid overshoot past m)
+    var ih1 = ipo_h(istW, iacW, istL, iacL, 2);
+    assert((f64_is_finite(ih0) == 1) && (f64_is_finite(ih1) == 1), "IPO h finite");
+    assert(f64_lt(f64_abs(f64_sub(ih1, im)), f64_abs(f64_sub(ih0, im))) == 1,
+           "IPO step moves h toward target margin (|h−m| decreases)");
+
+    test_group("KTO — unpaired prospect-theoretic loss FD grad-check (detached reference point, both labels)");
+    pol_init(8, 4, 2, 3, 99); dpo_init();          # V=8 D=4, example length n=2
+    dpo_snapshot();                                # reference π_ref = current θ
+    rng_seed(123);
+    t_randn(P_E, 8 * 4, f64_div(f64_from(1), f64_from(10)));
+    t_randn(P_W, 4 * 8, f64_div(f64_from(1), f64_from(10)));   # θ diverges from π_ref -> ρ != 0
+    var kst = t_alloc(2); var kac = t_alloc(2);               # the labeled example
+    store64(kst + 0*8, 1); store64(kst + 1*8, 3); store64(kac + 0*8, 2); store64(kac + 1*8, 5);
+    var klst = t_alloc(2); var klac = t_alloc(2);             # a SEPARATE KL-estimation example
+    store64(klst + 0*8, 0); store64(klst + 1*8, 4); store64(klac + 0*8, 6); store64(klac + 1*8, 1);
+    var ktbeta = KTO_BETA(); var klamD = KTO_LAMBDA_D(); var klamU = KTO_LAMBDA_U();
+    var kz = kto_zref_raw(klst, klac, 2, 1);                  # detached reference point (constant scalar)
+    # ---- desirable (label = +1) ----
+    pol_zero_grads(); kto_backward_example(kst, kac, 2, 1, ktbeta, klamD, klamU, kz);   # analytic grads
+    var mrKDW = check_ktoblock(P_W, G_W, g_D * g_V, kst, kac, 2, 1, ktbeta, klamD, klamU, kz);
+    var mrKDE = check_ktoblock(P_E, G_E, g_V * g_D, kst, kac, 2, 1, ktbeta, klamD, klamU, kz);
+    var mrKDb = check_ktoblock(P_b, G_b, g_V, kst, kac, 2, 1, ktbeta, klamD, klamU, kz);
+    show("  KTO+ dW maxrel = ", mrKDW); show("  KTO+ dE maxrel = ", mrKDE); show("  KTO+ db maxrel = ", mrKDb);
+    assert(f64_lt(mrKDW, TOL()), "KTO desirable dW FD grad-check");
+    assert(f64_lt(mrKDE, TOL()), "KTO desirable dE FD grad-check");
+    assert(f64_lt(mrKDb, TOL()), "KTO desirable db FD grad-check");
+    # ---- undesirable (label = -1) ----
+    pol_zero_grads(); kto_backward_example(kst, kac, 2, 0 - 1, ktbeta, klamD, klamU, kz);
+    var mrKUW = check_ktoblock(P_W, G_W, g_D * g_V, kst, kac, 2, 0 - 1, ktbeta, klamD, klamU, kz);
+    var mrKUE = check_ktoblock(P_E, G_E, g_V * g_D, kst, kac, 2, 0 - 1, ktbeta, klamD, klamU, kz);
+    var mrKUb = check_ktoblock(P_b, G_b, g_V, kst, kac, 2, 0 - 1, ktbeta, klamD, klamU, kz);
+    show("  KTO- dW maxrel = ", mrKUW); show("  KTO- dE maxrel = ", mrKUE); show("  KTO- db maxrel = ", mrKUb);
+    assert(f64_lt(mrKUW, TOL()), "KTO undesirable dW FD grad-check");
+    assert(f64_lt(mrKUE, TOL()), "KTO undesirable dE FD grad-check");
+    assert(f64_lt(mrKUb, TOL()), "KTO undesirable db FD grad-check");
+    # ---- detachment falsifier (two-sided): z-detached FD MATCHES the analytic grad;
+    # the LIVE FD (differentiating through z) DIVERGES — proving z is treated constant.
+    pol_zero_grads(); kto_backward_example(kst, kac, 2, 1, ktbeta, klamD, klamU, kz);   # analytic (desirable)
+    var mrDet = check_ktoblock(P_W, G_W, g_D * g_V, kst, kac, 2, 1, ktbeta, klamD, klamU, kz);
+    var mrLive = check_ktoblock_live(P_W, G_W, g_D * g_V, kst, kac, 2, 1, ktbeta, klamD, klamU, klst, klac, 2, 1);
+    show("  KTO z-detached FD maxrel = ", mrDet); show("  KTO z-LIVE FD maxrel = ", mrLive);
+    assert(f64_lt(mrDet, TOL()), "KTO detached-z FD matches analytic (z constant)");
+    assert(f64_gt(mrLive, f64_div(f64_from(1), f64_from(1000))) == 1,
+           "KTO live-z FD DIVERGES (>1e-3) — analytic grad is the z-detached one");
+    # ---- direction falsifier: a descent step RAISES ρ for a desirable example ----
+    var krd0 = kto_logratio(kst, kac, 2);
+    pol_zero_grads(); kto_backward_example(kst, kac, 2, 1, ktbeta, klamD, klamU, kz);
+    pol_adam_step(f64_div(f64_from(1), f64_from(100)));       # lr 0.01
+    var krd1 = kto_logratio(kst, kac, 2);
+    assert((f64_is_finite(krd0) == 1) && (f64_is_finite(krd1) == 1), "KTO ρ finite");
+    assert(f64_gt(krd1, krd0) == 1, "KTO desirable step raises ρ");
+    # ---- and LOWERS ρ for an undesirable example (fresh policy + adam state) ----
+    pol_init(8, 4, 2, 3, 99); dpo_init(); dpo_snapshot();
+    rng_seed(123);
+    t_randn(P_E, 8 * 4, f64_div(f64_from(1), f64_from(10)));
+    t_randn(P_W, 4 * 8, f64_div(f64_from(1), f64_from(10)));
+    var kzu = kto_zref_raw(klst, klac, 2, 1);
+    var kru0 = kto_logratio(kst, kac, 2);
+    pol_zero_grads(); kto_backward_example(kst, kac, 2, 0 - 1, ktbeta, klamD, klamU, kzu);
+    pol_adam_step(f64_div(f64_from(1), f64_from(100)));
+    var kru1 = kto_logratio(kst, kac, 2);
+    assert(f64_lt(kru1, kru0) == 1, "KTO undesirable step lowers ρ");
 
     return assert_summary();
 }

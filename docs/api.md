@@ -7,10 +7,10 @@
 
 The **stable public API** below is frozen for the 1.x series: signatures and semantics will not
 change without a major version bump. Minor versions may **add** symbols (v1.1.0 added the
-alignment surface in `src/dpo.cyr` — DPO + the RLHF KL penalty — without touching any existing
-signature). Each symbol is exercised by the demo (`src/main.cyr`), the grad-check suite
-(`tests/tarka.tcyr`, 34/34), and/or the quickstart consumer (`examples/quickstart.cyr`) — noted
-per row.
+alignment surface — DPO + the RLHF KL penalty in `src/dpo.cyr`, plus IPO + KTO in
+`src/preference_ext.cyr` — without touching any existing signature). Each symbol is exercised by
+the demo (`src/main.cyr`), the grad-check suite (`tests/tarka.tcyr`, 50/50), and/or the quickstart
+consumer (`examples/quickstart.cyr`) — noted per row.
 
 **Not frozen (internal):** the per-element optimizer internals (`adam_one`, `*_adam_step`),
 gradient accumulators / zeroers (`*_zero_grads`, `*_backward`, `gae_*`, `ppo_snapshot`,
@@ -78,6 +78,29 @@ finite-difference grad-checked (`tests/tarka.tcyr`).
 
 **Not frozen (internal mechanism):** `pol_accum_scaled`, `dpo_seqlogp_theta`/`dpo_seqlogp_ref`,
 `ref_logits`/`ref_softmax`, `dpo_bufs`/`dpo_sample_to`/`dpo_count_target`.
+
+## Preference-optimization extensions: IPO + KTO — `src/preference_ext.cyr` (added v1.1.0, additive)
+
+Two more preference losses on the same frozen-reference machinery. IPO regresses the implicit-reward
+margin toward a finite target (it does not push to ∞ like DPO); KTO is unpaired (per-example
+desirable/undesirable against a detached reference point). Both hand-derived backwards are
+finite-difference grad-checked (`tests/tarka.tcyr`), including an IPO pull-to-margin falsifier and a
+KTO two-sided z-detachment falsifier.
+
+| symbol | purpose | tested by |
+|--------|---------|-----------|
+| `ipo_backward_pair(stW, acW, stL, acL, n, beta)` → f64 | one preference pair's IPO gradient `L=(h−1/(2β))²` (returns the loss) | demo, suite |
+| `ipo_pair_loss(stW, acW, stL, acL, n, beta)` → f64 / `ipo_h(...)` → f64 / `ipo_target(beta)` → f64 | forward IPO loss / the bare margin `h` / the target margin `1/(2β)` | demo, suite |
+| `ipo_train(steps, batch, lr)` / `ipo_mean_h(npairs)` → f64 | IPO training from sampled preferences / mean implicit-reward margin | demo |
+| `IPO_BETA()` → f64 | the IPO regularization strength β (0.5 → target margin 1.0) | demo, suite |
+| `kto_backward_example(states, actions, n, label, beta, lamD, lamU, z)` → f64 | one labeled example's KTO gradient (`label`>0 desirable; returns the loss) | demo, suite |
+| `kto_example_loss(states, actions, n, label, beta, lamD, lamU, z)` → f64 | forward KTO loss `λ(1−σ(u))` with a detached reference point `z` | suite |
+| `kto_logratio(states, actions, n)` → f64 / `kto_zref(kl_st, kl_ac, n, m)` → f64 | bare log-ratio ρ / the detached (clamped ≥0) batch reference point | demo, suite |
+| `kto_train(steps, batch, lr)` / `kto_mean_rho(n, thresh, want_desirable)` → f64 | unpaired KTO training (label by batch-mean count) / mean ρ over a population | demo |
+| `KTO_BETA()` `KTO_LAMBDA_D()` `KTO_LAMBDA_U()` → f64 | KTO temperature β (0.1) and desirable/undesirable weights (1.0) | demo, suite |
+
+**Not frozen (internal mechanism):** `kto_zref_raw`, `kto_example_loss_live` (the detachment-falsifier
+forward), `ipo_bufs`/`kto_bufs`.
 
 ## Parity task + sample-efficiency benchmark — `src/parity.cyr`
 

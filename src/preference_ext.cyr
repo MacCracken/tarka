@@ -1,0 +1,259 @@
+# tarka — preference-optimization extensions: IPO (identity preference optimization)
+# + KTO (Kahneman-Tversky optimization). Both are ADDITIVE to the frozen 1.x DPO
+# surface (src/dpo.cyr) — they reuse its frozen-reference machinery and the policy
+# softmax-CE seed (pol_accum_scaled), adding only their own loss + gradient
+# coefficient. Hand-derived and finite-difference-gated (tests/tarka.tcyr).
+#
+# Shared reparam (from dpo.cyr): for a stored sequence y the implicit reward uses
+# the bare log-ratio against the FROZEN reference policy
+#   ρ(y) = log π_θ(y) − log π_ref(y)            (dpo_seqlogp_theta − dpo_seqlogp_ref)
+# and the policy gradient is seeded by pol_accum_scaled(states,actions,n,scale),
+# which adds  G += scale · d(Σ_t −log π_θ(a_t))/dθ = −scale · dρ/dθ. So to realize a
+# true-gradient contribution  G += C · dρ/dθ  one passes  scale = −C  (the same sign
+# convention dpo_backward_pair uses: winner C_w=(σ−1)β → scale=+β(1−σ)).
+#
+# ── IPO (Azar et al. 2024, "A General Theoretical Paradigm…", the ΨPO identity map).
+# Unlike DPO's −ln σ(βΔ) (whose gradient → 0 as the margin → ∞, so it never stops
+# pushing), IPO regresses the bare log-ratio margin h toward a FINITE target 1/(2β):
+#   h = (log π_θ−log π_ref)_w − (log π_θ−log π_ref)_l        (= dpo_delta with β=1)
+#   L = (h − 1/(2β))²,   dL/dh = 2(h − 1/(2β)).
+# h depends on θ with coefficient +1 on the winner, −1 on the loser (ref frozen), so
+#   winner: C_w = 2(h−m)·(+1) → scale_w = −2(h−m)
+#   loser : C_l = 2(h−m)·(−1) → scale_l = +2(h−m).
+# Here IPO's β is a REGULARIZATION strength (smaller β ⇒ larger target margin) — a
+# DIFFERENT role from DPO's β, which scales the implicit reward inside the sigmoid.
+#
+# ── KTO (Ethayarajh et al. 2024, "Model Alignment as Prospect Theoretic Optimization").
+# UNPAIRED: each example is labeled desirable (+1) or undesirable (−1) on its own,
+# scored against a DETACHED reference point z (a batch estimate of E[KL(π_θ‖π_ref)],
+# treated as a constant w.r.t. the gradient). The value is the prospect value
+# 1 − σ(u) (NOT DPO's −ln σ), so its gradient magnitude is σ(u)(1−σ(u)), not (1−σ):
+#   desirable  : u = β(ρ − z),  L = λ_D·(1 − σ(u)),  dL/dρ = −λ_D·β·σ(u)(1−σ(u))
+#   undesirable: u = β(z − ρ),  L = λ_U·(1 − σ(u)),  dL/dρ = +λ_U·β·σ(u)(1−σ(u)).
+# So scale = −dL/dρ:  desirable +λ_D·β·s′,  undesirable −λ_U·β·s′  (s′=σ(u)(1−σ(u))).
+# z MUST be detached: it is computed once as a plain scalar and passed in; the FD
+# grad-check perturbs θ with z held constant, which is exactly the analytic gradient.
+#
+# Include AFTER src/dpo.cyr (ρ via dpo_seqlogp_*, pol_accum_scaled), src/reward.cyr
+# (sigma_stable), src/rl.cyr (pol_*, G_*, R_*, g_V/g_D/g_T, guard).
+
+# ============================ IPO ============================================
+
+fn IPO_BETA(): i64 { return f64_div(f64_from(1), f64_from(2)); }   # 0.5 → target margin 1/(2β)=1.0
+
+# IPO target margin m = 1/(2β).
+fn ipo_target(beta): i64 { return f64_div(f64_from(1), f64_mul(f64_from(2), beta)); }
+
+# bare log-ratio margin h for a preference pair (winner ≻ loser), each n steps.
+# Identical to the DPO Δ at β=1 (the β-free implicit-reward gap).
+fn ipo_h(stW, acW, stL, acL, n): i64 {
+    return dpo_delta(stW, acW, stL, acL, n, f64_from(1));
+}
+
+# forward-only IPO loss (h − m)² — the FD grad-check target (reference frozen, so
+# only the θ log-probs move).
+fn ipo_pair_loss(stW, acW, stL, acL, n, beta): i64 {
+    var e = f64_sub(ipo_h(stW, acW, stL, acL, n), ipo_target(beta));
+    return f64_mul(e, e);
+}
+
+# IPO backward for one pair → accumulates into G_E/G_W/G_b. dL/dh = 2(h−m); winner
+# seeded with scale −2(h−m), loser +2(h−m). Gradient descent moves h TOWARD m from
+# either side (it pulls back if h overshoots — the IPO regularization property).
+# Returns the pair loss.
+fn ipo_backward_pair(stW, acW, stL, acL, n, beta): i64 {
+    var e = f64_sub(ipo_h(stW, acW, stL, acL, n), ipo_target(beta));
+    var g = f64_mul(f64_from(2), e);                  # dL/dh = 2(h−m)
+    pol_accum_scaled(stW, acW, n, f64_neg(g));        # winner: scale = −2(h−m)
+    pol_accum_scaled(stL, acL, n, g);                 # loser : scale = +2(h−m)
+    return f64_mul(e, e);
+}
+
+# ---- IPO training loop (demo) — mirrors dpo_train, squared-margin instead of −lnσ.
+var IA_st = 0; var IA_ac = 0; var IB_st = 0; var IB_ac = 0;
+fn ipo_bufs(): i64 {
+    if (IA_st == 0) { IA_st = t_alloc(g_T); IA_ac = t_alloc(g_T); IB_st = t_alloc(g_T); IB_ac = t_alloc(g_T); }
+    return 0;
+}
+fn ipo_train(steps, batch, lr): i64 {
+    ipo_bufs();
+    var invB = f64_div(f64_from(1), f64_from(batch));
+    var s = 0;
+    while (s < steps) {
+        pol_zero_grads();
+        var used = 0; var nb = 0;
+        while (nb < batch) {
+            dpo_sample_to(IA_st, IA_ac); dpo_sample_to(IB_st, IB_ac);
+            var ra = dpo_count_target(IA_ac); var rb = dpo_count_target(IB_ac);
+            if (f64_gt(ra, rb) == 1) { ipo_backward_pair(IA_st, IA_ac, IB_st, IB_ac, g_T, IPO_BETA()); used = used + 1; }
+            elif (f64_gt(rb, ra) == 1) { ipo_backward_pair(IB_st, IB_ac, IA_st, IA_ac, g_T, IPO_BETA()); used = used + 1; }
+            # tie → no preference signal this slot
+            nb = nb + 1;
+        }
+        if (used > 0) {
+            t_scale(G_E, g_V * g_D, invB); t_scale(G_W, g_D * g_V, invB); t_scale(G_b, g_V, invB);
+            pol_adam_step(lr);
+        }
+        s = s + 1;
+    }
+    return 0;
+}
+
+# mean IPO margin h over n fresh on-policy pairs (winner = higher target count) — the
+# convergence metric (should approach the target margin 1/(2β)).
+fn ipo_mean_h(npairs): i64 {
+    ipo_bufs();
+    var sum = f64_from(0); var k = 0;
+    while (k < npairs) {
+        dpo_sample_to(IA_st, IA_ac); dpo_sample_to(IB_st, IB_ac);
+        var ra = dpo_count_target(IA_ac); var rb = dpo_count_target(IB_ac);
+        if (f64_gt(ra, rb) == 1) { sum = f64_add(sum, ipo_h(IA_st, IA_ac, IB_st, IB_ac, g_T)); }
+        else { sum = f64_add(sum, ipo_h(IB_st, IB_ac, IA_st, IA_ac, g_T)); }
+        k = k + 1;
+    }
+    return f64_div(sum, f64_from(npairs));
+}
+
+# ============================ KTO ============================================
+
+fn KTO_BETA(): i64 { return f64_div(f64_from(1), f64_from(10)); }   # 0.1
+fn KTO_LAMBDA_D(): i64 { return f64_from(1); }                      # desirable weight 1.0
+fn KTO_LAMBDA_U(): i64 { return f64_from(1); }                      # undesirable weight 1.0
+
+# bare log-ratio ρ = log π_θ(y) − log π_ref(y) for one stored sequence (NO β — β
+# enters once, outside, in u = β(ρ − z); reusing dpo_delta here would double-count β).
+fn kto_logratio(states, actions, n): i64 {
+    return f64_sub(dpo_seqlogp_theta(states, actions, n), dpo_seqlogp_ref(states, actions, n));
+}
+
+# reference point estimator: mean ρ over m stored examples (each n steps, laid out
+# contiguously with stride n). _raw is unclamped; kto_zref clamps ≥ 0 (the KL ref
+# point is non-negative). Both are DETACHED — computed once, passed in as a constant.
+fn kto_zref_raw(kl_st, kl_ac, n, m): i64 {
+    var sum = f64_from(0); var i = 0;
+    while (i < m) {
+        sum = f64_add(sum, kto_logratio(kl_st + i * n * 8, kl_ac + i * n * 8, n));
+        i = i + 1;
+    }
+    return f64_div(sum, f64_from(m));
+}
+fn kto_zref(kl_st, kl_ac, n, m): i64 {
+    var z = kto_zref_raw(kl_st, kl_ac, n, m);
+    if (f64_lt(z, f64_from(0)) == 1) { return f64_from(0); }   # clamp ≥ 0 (detached anyway)
+    return z;
+}
+
+# forward-only KTO per-example loss (the FD grad-check target). label>0 desirable,
+# label<=0 undesirable. z is a CONSTANT scalar (detachment is structural: perturbing
+# θ here does not move z, so FD matches the z-detached analytic gradient).
+fn kto_example_loss(states, actions, n, label, beta, lamD, lamU, z): i64 {
+    var rho = kto_logratio(states, actions, n);
+    if (label > 0) {
+        var ud = f64_mul(beta, f64_sub(rho, z));
+        return f64_mul(lamD, f64_sub(f64_from(1), sigma_stable(ud)));
+    }
+    var uu = f64_mul(beta, f64_sub(z, rho));
+    return f64_mul(lamU, f64_sub(f64_from(1), sigma_stable(uu)));
+}
+
+# LIVE variant — recomputes z from the CURRENT θ inside the forward (differentiates
+# THROUGH the reference point). Used ONLY by the detachment falsifier: its FD must
+# DIVERGE from the z-detached analytic gradient, proving the analytic grad treats z
+# as constant. Never used in training.
+fn kto_example_loss_live(states, actions, n, label, beta, lamD, lamU, kl_st, kl_ac, kl_n, kl_m): i64 {
+    return kto_example_loss(states, actions, n, label, beta, lamD, lamU, kto_zref_raw(kl_st, kl_ac, kl_n, kl_m));
+}
+
+# KTO backward for one labeled example → accumulates into G_E/G_W/G_b. The gradient
+# coefficient is the PROSPECT-value magnitude s′ = σ(u)(1−σ(u)) (NOT DPO's 1−σ); the
+# sign lives in the +λ_D / −λ_U prefactor (descent raises ρ for desirable, lowers it
+# for undesirable). Returns the example loss.
+fn kto_backward_example(states, actions, n, label, beta, lamD, lamU, z): i64 {
+    var rho = kto_logratio(states, actions, n);
+    if (label > 0) {
+        var ud = f64_mul(beta, f64_sub(rho, z));
+        var sd = sigma_stable(ud);
+        var spd = f64_mul(sd, f64_sub(f64_from(1), sd));                 # σ(u)(1−σ(u))
+        pol_accum_scaled(states, actions, n, f64_mul(lamD, f64_mul(beta, spd)));   # +λ_D·β·s′
+        return f64_mul(lamD, f64_sub(f64_from(1), sd));
+    }
+    var uu = f64_mul(beta, f64_sub(z, rho));
+    var su = sigma_stable(uu);
+    var spu = f64_mul(su, f64_sub(f64_from(1), su));
+    pol_accum_scaled(states, actions, n, f64_neg(f64_mul(lamU, f64_mul(beta, spu))));   # −λ_U·β·s′
+    return f64_mul(lamU, f64_sub(f64_from(1), su));
+}
+
+# ---- KTO training loop (demo) — UNPAIRED. Per step: sample `batch` rollouts, store
+# them, label each desirable/undesirable by whether its target-count is above the
+# batch mean, compute the detached reference point z ONCE for the batch, then run the
+# per-example gradient. Desirable continuations are pushed up, undesirable down.
+var KA_st = 0; var KA_ac = 0; var KA_cnt = 0;
+fn KTO_BMAX(): i64 { return 64; }
+fn kto_bufs(): i64 {
+    if (KA_st == 0) {
+        KA_st = t_alloc(KTO_BMAX() * g_T); KA_ac = t_alloc(KTO_BMAX() * g_T); KA_cnt = t_alloc(KTO_BMAX());
+    }
+    return 0;
+}
+fn kto_train(steps, batch, lr): i64 {
+    guard(batch <= KTO_BMAX(), "kto_train: batch exceeds KTO_BMAX");
+    kto_bufs();
+    var invB = f64_div(f64_from(1), f64_from(batch));
+    var s = 0;
+    while (s < steps) {
+        # pass 1: sample + store; accumulate count + log-ratio sums for the batch
+        var csum = f64_from(0); var zsum = f64_from(0); var bi = 0;
+        while (bi < batch) {
+            rl_rollout(rl_prompt());
+            var t = 0;
+            while (t < g_T) {
+                store64(KA_st + (bi * g_T + t) * 8, load64(R_states + t * 8));
+                store64(KA_ac + (bi * g_T + t) * 8, load64(R_actions + t * 8));
+                t = t + 1;
+            }
+            var c = dpo_count_target(R_actions);
+            store64(KA_cnt + bi * 8, c);
+            csum = f64_add(csum, c);
+            zsum = f64_add(zsum, kto_logratio(KA_st + bi * g_T * 8, KA_ac + bi * g_T * 8, g_T));
+            bi = bi + 1;
+        }
+        var meanc = f64_mul(csum, invB);
+        var z = f64_mul(zsum, invB);
+        if (f64_lt(z, f64_from(0)) == 1) { z = f64_from(0); }       # clamp ≥ 0 (detached)
+        # pass 2: label by count > batch-mean; backward each with the fixed detached z
+        pol_zero_grads();
+        bi = 0;
+        while (bi < batch) {
+            var lab = 0 - 1;
+            if (f64_gt(load64(KA_cnt + bi * 8), meanc) == 1) { lab = 1; }    # above-mean ⇒ desirable
+            kto_backward_example(KA_st + bi * g_T * 8, KA_ac + bi * g_T * 8, g_T, lab,
+                                 KTO_BETA(), KTO_LAMBDA_D(), KTO_LAMBDA_U(), z);
+            bi = bi + 1;
+        }
+        t_scale(G_E, g_V * g_D, invB); t_scale(G_W, g_D * g_V, invB); t_scale(G_b, g_V, invB);
+        pol_adam_step(lr);
+        s = s + 1;
+    }
+    return 0;
+}
+
+# mean ρ over n fresh rollouts whose target-count is above/below `thresh` — the KTO
+# demo metric (desirable mean ρ should rise above undesirable mean ρ after training).
+# want_desirable != 0 selects above-threshold rollouts, else below.
+fn kto_mean_rho(n, thresh, want_desirable): i64 {
+    kto_bufs();
+    var sum = f64_from(0); var cnt = 0; var k = 0;
+    while (k < n) {
+        rl_rollout(rl_prompt());
+        var c = dpo_count_target(R_actions);
+        var above = 0; if (f64_gt(c, thresh) == 1) { above = 1; }
+        if (above == want_desirable) {
+            sum = f64_add(sum, kto_logratio(R_states, R_actions, g_T));
+            cnt = cnt + 1;
+        }
+        k = k + 1;
+    }
+    if (cnt == 0) { return f64_from(0); }
+    return f64_div(sum, f64_from(cnt));
+}

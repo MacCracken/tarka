@@ -11,6 +11,7 @@ include "src/actorcritic.cyr"       # actor-critic: value critic, GAE, PPO, GRPO
 include "src/parity.cyr"  # actor-critic sample-efficiency benchmark (parity task)
 include "src/reward.cyr"        # reward-model: learned reward & process-reward models (Bradley-Terry)
 include "src/dpo.cyr"           # DPO (direct preference optimization) + RLHF KL-to-reference-policy penalty
+include "src/preference_ext.cyr"  # IPO (margin-regularized) + KTO (unpaired prospect-theoretic) preference losses
 include "src/preference.cyr"  # reward-model transmission demo (learned reward -> RL -> true reward)
 include "src/reasoning.cyr"  # verifier-guided reasoning (self-consistency, best-of-N)
 include "src/search.cyr"     # PRM-guided tree (beam) search on a sequential task
@@ -233,6 +234,42 @@ fn main(): i64 {
         align_ok = 1;
         puts("  alignment GATE PASS: DPO aligns from preferences; KL penalty pulls policy to reference\n");
     } else { puts("  alignment GATE FAIL\n"); }
+
+    # ---- alignment (cont.): IPO (margin-regularized) + KTO (unpaired prospect-theoretic) ----
+    # Two more preference optimizers on the SAME frozen-reference machinery. IPO regresses the
+    # implicit-reward margin h toward a FINITE target 1/(2β) (pulling back if it overshoots —
+    # DPO never stops pushing). KTO needs no pairs: each rollout is labeled desirable/undesirable
+    # on its own against a detached KL reference point. Both are FD-grad-checked (tests/tarka.tcyr).
+    puts("\n--- alignment: IPO (margin-regularized preferences) + KTO (unpaired prospect-theoretic) ---\n");
+    pol_init(V, D, T, target, 4242); dpo_init(); dpo_snapshot();
+    var ih0 = ipo_mean_h(100);
+    ipo_train(300, 16, f64_div(f64_from(5), f64_from(100)));   # 300 steps, batch 16, lr 0.05
+    var ih1 = ipo_mean_h(100);
+    var itgt = ipo_target(IPO_BETA());
+    puts("  IPO: mean implicit-reward margin h "); print_f2(ih0); puts(" -> "); print_f2(ih1);
+    puts("  (regressing toward target margin "); print_f2(itgt); puts(")"); _putc(10);
+
+    # two FIXED held sequences read the effect honestly (post-training sampling no longer
+    # produces target-free rollouts, so a sampled split would be degenerate): a desirable
+    # one (all target token) and an undesirable one (all a non-target token).
+    var ED_st = t_alloc(T); var ED_ac = t_alloc(T);
+    var EU_st = t_alloc(T); var EU_ac = t_alloc(T);
+    var nt = 0; if (target == 0) { nt = 1; }                   # a token id != target
+    var et = 0;
+    while (et < T) {
+        store64(ED_st + et*8, target); store64(ED_ac + et*8, target);
+        store64(EU_st + et*8, nt);     store64(EU_ac + et*8, nt);
+        et = et + 1;
+    }
+    pol_init(V, D, T, target, 4242); dpo_init(); dpo_snapshot();
+    var kd0 = kto_logratio(ED_st, ED_ac, T); var ku0 = kto_logratio(EU_st, EU_ac, T);   # ρ at the reference = 0
+    kto_train(300, 16, f64_div(f64_from(5), f64_from(100)));   # 300 steps, batch 16, lr 0.05
+    var kd1 = kto_logratio(ED_st, ED_ac, T); var ku1 = kto_logratio(EU_st, EU_ac, T);
+    puts("  KTO: desirable ρ "); print_f2(kd0); puts(" -> "); print_f2(kd1);
+    puts(" ; undesirable ρ "); print_f2(ku0); puts(" -> "); print_f2(ku1); _putc(10);
+    if ((f64_gt(ih1, ih0) == 1) && (f64_gt(kd1, kd0) == 1) && (f64_lt(ku1, ku0) == 1)) {
+        puts("  preference-ext: IPO raises h toward its target margin; KTO raises desirable ρ + lowers undesirable ρ\n");
+    }
 
     if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (align_ok == 1)) {
         puts("\n  ALL GATES PASS\n"); return 0;
