@@ -5,21 +5,26 @@
 
 ## Version
 
-**1.1.0** — Unreleased. **Alignment from preferences — DPO, IPO, KTO + the RLHF KL-to-reference-policy
-penalty**, all over a FROZEN reference policy (`dpo_snapshot`). **DPO + KL** (`src/dpo.cyr`): DPO
-reparametrizes the Bradley-Terry loss onto the policy (`Δ = β·[(log π_θ − log π_ref)_w − (...)_l]`,
-`L = −ln σ(Δ)`, β=0.1; Rafailov 2023) — reuses `reward.cyr`'s `bt_loss` and `rl.cyr`'s softmax-CE seed,
-no reward model / critic / sampler; the KL penalty `β·KL(π_θ‖π_ref)` (Ouyang 2022; `dKL/dlogit_k =
-p_k·(f_k−KL)`) pulls a diverged policy back. **IPO + KTO** (`src/preference_ext.cyr`): IPO (Azar 2024)
-regresses the bare margin `h` toward a finite target `1/(2β)` via `L=(h−1/(2β))²` (pulls back instead of
-pushing to ∞); KTO (Ethayarajh 2024) is UNPAIRED — per-example desirable/undesirable against a **detached**
-KL reference point, gradient coefficient `σ(u)(1−σ(u))`. Demo: DPO target freq **0.94 → 24.00 / 24**; KL
-mean **3.33 → 2.46**; IPO margin **h 0.00 → 0.59** toward 1.0; KTO desirable ρ **0.00 → 80.31**,
-undesirable ρ **0.00 → −138.27**. All four hand-derived backwards FD-grad-checked + falsifiers
-(IPO pull-to-margin; KTO two-sided z-detachment + direction); suite **24/24 → 34/34 → 50/50**. Additive —
-the frozen v1.0 surface unchanged, all prior gates byte-identical. Surfaced by the 2026-06-25
-ifran/secureyeoman product-mining (all shell preference losses to Python — demand evidence, not ported
-code). Pin 6.2.37.
+**1.1.1** — 2026-06-27. **IPO + KTO — completing the standard preference-loss set** (`src/preference_ext.cyr`),
+on the same frozen-reference machinery as DPO (1.1.0). **IPO** (Azar 2024) regresses the bare implicit-reward
+margin `h` toward a FINITE target `1/(2β)` via `L=(h−1/(2β))²` (pulls `h` back if it overshoots, where DPO
+pushes to ∞). **KTO** (Ethayarajh 2024) is UNPAIRED — each example labeled desirable/undesirable against a
+**detached** KL reference point `z`; gradient coefficient is the prospect-value magnitude `σ(u)(1−σ(u))`
+(not DPO's `1−σ`). Demo: IPO margin **h 0.00 → 0.59** toward 1.0; KTO desirable ρ **0.00 → 80.31**,
+undesirable ρ **0.00 → −138.27**. Both hand-derived backwards FD-grad-checked + falsifiers (IPO pull-to-margin;
+KTO two-sided z-detachment — z-detached FD ~14e-9 vs z-live diverges ~9.7 — + direction); suite
+**34/34 → 50/50**. Additive — the frozen v1.0 surface unchanged, all prior gates byte-identical. Pin 6.2.37.
+
+**1.1.0** — 2026-06-25. **Alignment from preferences — DPO + the RLHF KL-to-reference-policy
+penalty** (`src/dpo.cyr`), both over a FROZEN reference policy (`dpo_snapshot`). DPO reparametrizes
+the Bradley-Terry loss onto the policy (`Δ = β·[(log π_θ − log π_ref)_w − (...)_l]`, `L = −ln σ(Δ)`,
+β=0.1; Rafailov 2023) — reuses `reward.cyr`'s `bt_loss` and `rl.cyr`'s softmax-CE seed, no reward
+model / critic / sampler. The KL penalty `β·KL(π_θ‖π_ref)` (Ouyang 2022; `dKL/dlogit_k = p_k·(f_k−KL)`)
+pulls a diverged policy back to the reference. Demo: DPO raises target freq **0.94 → 24.00 / 24** from
+preferences alone; KL penalty pulls mean KL **3.33 → 2.46**. Both hand-derived backwards FD-grad-checked
++ descent-direction falsifiers; suite **24/24 → 34/34**. Additive — the frozen v1.0 surface unchanged,
+all prior gates byte-identical. Surfaced by the 2026-06-25 ifran/secureyeoman product-mining (both
+shell DPO/RLHF to Python — demand evidence, not ported code). Pin 6.2.37.
 
 **1.0.0** — 2026-06-22. **v1.0 — clean cut; the RL→reasoning reference is complete + frozen.**
 Public API frozen + documented (`docs/api.md`: stable 1.x surface, internal mechanism

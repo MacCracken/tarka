@@ -1,4 +1,4 @@
-# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0)
+# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1)
 
 > Satisfies the v1.0 criterion *"Public RL/reasoning API frozen — every exported symbol
 > documented and tested."*
@@ -6,8 +6,8 @@
 ## Freeze policy
 
 The **stable public API** below is frozen for the 1.x series: signatures and semantics will not
-change without a major version bump. Minor versions may **add** symbols (v1.1.0 added the
-alignment surface — DPO + the RLHF KL penalty in `src/dpo.cyr`, plus IPO + KTO in
+change without a major version bump. Minor/patch versions may **add** symbols (v1.1.0 added the
+alignment surface — DPO + the RLHF KL penalty in `src/dpo.cyr`; v1.1.1 added IPO + KTO in
 `src/preference_ext.cyr` — without touching any existing signature). Each symbol is exercised by
 the demo (`src/main.cyr`), the grad-check suite (`tests/tarka.tcyr`, 50/50), and/or the quickstart
 consumer (`examples/quickstart.cyr`) — noted per row.
@@ -79,7 +79,7 @@ finite-difference grad-checked (`tests/tarka.tcyr`).
 **Not frozen (internal mechanism):** `pol_accum_scaled`, `dpo_seqlogp_theta`/`dpo_seqlogp_ref`,
 `ref_logits`/`ref_softmax`, `dpo_bufs`/`dpo_sample_to`/`dpo_count_target`.
 
-## Preference-optimization extensions: IPO + KTO — `src/preference_ext.cyr` (added v1.1.0, additive)
+## Preference-optimization extensions: IPO + KTO — `src/preference_ext.cyr` (added v1.1.1, additive)
 
 Two more preference losses on the same frozen-reference machinery. IPO regresses the implicit-reward
 margin toward a finite target (it does not push to ∞ like DPO); KTO is unpaired (per-example
