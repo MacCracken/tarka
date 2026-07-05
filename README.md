@@ -23,6 +23,12 @@ the *methods* are the point):
 
 - **RL training** — REINFORCE → PPO (value critic + GAE, clipped surrogate) & GRPO
   (group-relative) → learned **reward / process-reward models** (Bradley-Terry).
+- **Alignment** (1.1.x) — the standard preference-loss set on a frozen reference
+  policy: **DPO** + the RLHF **KL-to-reference** penalty, **IPO**
+  (margin-regularized), **KTO** (unpaired ±1 thumbs) — plus **preference-file
+  ingestion**: `tarka --pref <prefs.jsonl>` trains all three from an
+  [ifran](https://github.com/MacCracken/ifran) `pref export` (curated human
+  preferences in, aligned policy out — the control-plane loop closed).
 - **Reasoning** — inference-time deliberation: **self-consistency** (sample-and-vote),
   **verifier best-of-N**, and **PRM-guided beam search** that steers generation to a
   verifier objective greedy and best-of-N cannot reach.
@@ -66,7 +72,8 @@ transformer does — so tarka does **not** depend on attn11-the-binary. See
 cyrius deps                              # resolve stdlib + rosnet/tyche/akshara
 cyrius build src/main.cyr build/tarka    # compile to a static ELF
 ./build/tarka                            # run the demo — every acceptance gate
-cyrius test                              # 24/24 finite-difference grad-checks
+./build/tarka --pref prefs.jsonl         # train DPO/IPO/KTO from an ifran pref export
+cyrius test                              # finite-difference grad-checks + ingestion suite
 ```
 
 The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 1.8 s).

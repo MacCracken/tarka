@@ -1,0 +1,403 @@
+# tarka — preference-file ingestion (ifran Lane 3): train DPO / IPO / KTO from
+# an ifran `pref export` JSONL file instead of on-policy synthetic rollouts.
+#
+#   tarka --pref <prefs.jsonl>
+#
+# One JSON object per line (ifran's export format, src/pref.cyr there):
+#   {"kind":"pair","prompt":"...","chosen":"...","rejected":"..."}     DPO / IPO
+#   {"kind":"unary","prompt":"...","completion":"...","label":±1}      KTO
+#
+# The pipeline: read the file → akshara byte-level vocab over the WHOLE file
+# (`corpus_set`, so every byte of every field tokenizes) → parse each line with
+# bayan's flat JSON parser → tokenize prompt/completion(s) → drive the EXISTING
+# hand-derived, FD-gated primitives (`dpo_backward_pair` / `ipo_backward_pair`
+# / `kto_backward_example`) full-batch over the ingested examples. No new
+# gradient math lands here — this is a data path, not a loss.
+#
+# Sequence shape (bigram policy): for prompt tokens p₀..p_{a-1} and completion
+# tokens c₀..c_{b-1}, the scored span is the completion given its left context:
+#   states  = [p_{a-1}, c₀, …, c_{b-2}]
+#   actions = [c₀,      c₁, …, c_{b-1}]      (n = b pairs; prompt-less rows use
+# the completion's own bigrams, n = b−1). DPO/IPO pairs truncate both sides to
+# the shared min (the primitive is single-n); everything caps at PI_NMAX.
+#
+# Gates (printed + exit code): with θ snapshotted as its own reference, every
+# pair starts at Δ=0 (loss −lnσ(0)=0.693, ranking accuracy 0) — after training,
+# DPO/IPO must rank every pair correctly (Δ>0) with the mean loss down, and KTO
+# must separate desirable from undesirable mean log-ratios.
+#
+# Known limitation (documented, not hidden): bayan's flat parser scans quoted
+# strings to the next '"' — it does not honor \" escapes, so a row whose TEXT
+# contains a double-quote mis-parses and is counted as skipped. ifran escapes
+# on export; such rows are rare and skipping is loud (the skip count prints).
+# Include AFTER preference_ext.cyr (uses dpo_*/ipo_*/kto_* + pol_*/G_*).
+
+fn PI_NMAX(): i64 { return 48; }      # per-sequence (state,action) pair cap
+fn PI_MAXEX(): i64 { return 256; }    # per-kind ingested-row cap
+fn PI_FMAX(): i64 { return 1048576; } # 1 MB file cap
+
+# pair rows: 40 B each — stW acW stL acL n
+var PI_pw = 0; var PI_np = 0;
+# unary rows: 32 B each — st ac n label
+var PI_un = 0; var PI_nu = 0;
+var PI_skipped = 0;
+
+fn _pi_puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+
+# local 2-decimal f64 printer (main.cyr's print_f2 is not visible to src modules)
+fn _pi_f2(val): i64 {
+    var b[8];
+    if (((val >> 63) & 1) == 1) { store8(&b, 45); print(&b, 1); val = f64_abs(val); }
+    var fl = f64_floor(val);
+    fmt_int(f64_to(fl));
+    store8(&b, 46); print(&b, 1);
+    var frac = f64_sub(val, fl);
+    var i = 0;
+    while (i < 2) {
+        frac = f64_mul(frac, f64_from(10));
+        var d = f64_floor(frac);
+        fmt_int(f64_to(d));
+        frac = f64_sub(frac, d);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# unescape the common JSON escapes in-place-ish (src Str -> fresh buffer).
+# Returns the buffer; out_len cell gets the unescaped length.
+fn _pi_unescape(s, out_len): i64 {
+    var sd = str_data(s);
+    var sl = str_len(s);
+    var out = alloc(sl + 1);
+    var i = 0;
+    var o = 0;
+    while (i < sl) {
+        var c = load8(sd + i);
+        if (c == 92) {                                # backslash
+            if (i + 1 < sl) {
+                var e = load8(sd + i + 1);
+                if (e == 110) { store8(out + o, 10); }        # \n
+                elif (e == 116) { store8(out + o, 9); }       # \t
+                elif (e == 114) { store8(out + o, 13); }      # \r
+                elif (e == 92) { store8(out + o, 92); }       # backslash
+                elif (e == 34) { store8(out + o, 34); }       # quote
+                else { store8(out + o, e); }                  # unknown: keep raw
+                o = o + 1;
+                i = i + 2;
+            } else { store8(out + o, c); o = o + 1; i = i + 1; }
+        } else { store8(out + o, c); o = o + 1; i = i + 1; }
+    }
+    store8(out + o, 0);
+    store64(out_len, o);
+    return out;
+}
+
+# tokenize len bytes via akshara's byte vocab (corpus_set over the whole file
+# guarantees coverage). out[i] = token id.
+fn _pi_tok(txt, len, out): i64 {
+    var i = 0;
+    while (i < len) {
+        store64(out + i * 8, load64(g_char2id + load8(txt + i) * 8));
+        i = i + 1;
+    }
+    return len;
+}
+
+# build the scored (states, actions) span for (prompt, completion) — see the
+# header. Returns n (0 = unusable row). st/ac are caller buffers ≥ PI_NMAX.
+fn _pi_seq(ptxt, plen, ctxt, clen, st, ac): i64 {
+    if (clen < 1) { return 0; }
+    var full = alloc((plen + clen) * 8);
+    _pi_tok(ptxt, plen, full);
+    _pi_tok(ctxt, clen, full + plen * 8);
+    var base = plen - 1;
+    var n = clen;
+    if (plen == 0) { base = 0; n = clen - 1; }
+    if (n < 1) { return 0; }
+    if (n > PI_NMAX()) { n = PI_NMAX(); }
+    var i = 0;
+    while (i < n) {
+        store64(st + i * 8, load64(full + (base + i) * 8));
+        store64(ac + i * 8, load64(full + (base + i + 1) * 8));
+        i = i + 1;
+    }
+    return n;
+}
+
+# fetch a string field: unescaped bytes + length via out cells. 0 = absent.
+fn _pi_field(pairs, key, out_len): i64 {
+    var v = bayan_json_get(pairs, str_from(key));
+    if (v == 0) { return 0; }
+    return _pi_unescape(v, out_len);
+}
+
+# parse one JSONL line into the tables. Returns 1 ingested / 0 skipped.
+fn _pi_line(ld, ll): i64 {
+    var pairs = bayan_json_parse(str_new(ld, ll));
+    if (pairs == 0) { return 0; }
+    var kind = bayan_json_get(pairs, str_from("kind"));
+    if (kind == 0) { return 0; }
+    var plen = alloc(8);
+    var p = _pi_field(pairs, "prompt", plen);
+    if (p == 0) { return 0; }
+    if (str_eq(kind, str_from("pair")) == 1) {
+        if (PI_np >= PI_MAXEX()) { return 0; }
+        var clen = alloc(8);
+        var c = _pi_field(pairs, "chosen", clen);
+        var rlen = alloc(8);
+        var rj = _pi_field(pairs, "rejected", rlen);
+        if (c == 0) { return 0; }
+        if (rj == 0) { return 0; }
+        var stW = t_alloc(PI_NMAX()); var acW = t_alloc(PI_NMAX());
+        var stL = t_alloc(PI_NMAX()); var acL = t_alloc(PI_NMAX());
+        var nW = _pi_seq(p, load64(plen), c, load64(clen), stW, acW);
+        var nL = _pi_seq(p, load64(plen), rj, load64(rlen), stL, acL);
+        var n = nW;
+        if (nL < n) { n = nL; }                       # single-n primitive: shared min
+        if (n < 1) { return 0; }
+        var row = PI_pw + PI_np * 40;
+        store64(row, stW); store64(row + 8, acW);
+        store64(row + 16, stL); store64(row + 24, acL);
+        store64(row + 32, n);
+        PI_np = PI_np + 1;
+        return 1;
+    }
+    if (str_eq(kind, str_from("unary")) == 1) {
+        if (PI_nu >= PI_MAXEX()) { return 0; }
+        var klen = alloc(8);
+        var comp = _pi_field(pairs, "completion", klen);
+        if (comp == 0) { return 0; }
+        var lab = bayan_json_get_int(pairs, str_from("label"));
+        if (lab != 1) { if (lab != (0 - 1)) { return 0; } }   # ±1 only (ifran's contract)
+        var st = t_alloc(PI_NMAX()); var ac = t_alloc(PI_NMAX());
+        var n = _pi_seq(p, load64(plen), comp, load64(klen), st, ac);
+        if (n < 1) { return 0; }
+        var row = PI_un + PI_nu * 32;
+        store64(row, st); store64(row + 8, ac);
+        store64(row + 16, n); store64(row + 24, lab);
+        PI_nu = PI_nu + 1;
+        return 1;
+    }
+    return 0;
+}
+
+# ingest the whole file into the tables (corpus/policy must already be set up).
+fn pref_ingest_file(buf, flen): i64 {
+    PI_pw = alloc(PI_MAXEX() * 40);
+    PI_un = alloc(PI_MAXEX() * 32);
+    PI_np = 0; PI_nu = 0; PI_skipped = 0;
+    var i = 0;
+    var ls = 0;
+    while (i <= flen) {
+        var atend = 0;
+        if (i == flen) { atend = 1; }
+        elif (load8(buf + i) == 10) { atend = 1; }
+        if (atend == 1) {
+            if (i > ls) {
+                if (_pi_line(buf + ls, i - ls) == 0) { PI_skipped = PI_skipped + 1; }
+            }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    return PI_np + PI_nu;
+}
+
+# pair-row field accessor (rows are 40 B: stW acW stL acL n)
+fn _pi_r(row, k): i64 { return load64(row + k * 8); }
+
+# ---- gates ---------------------------------------------------------------------
+# mean DPO pair loss + ranking accuracy (Δ>0 count) over the ingested pairs
+fn _pi_dpo_eval(acc_out): i64 {
+    var lsum = f64_from(0);
+    var right = 0;
+    var k = 0;
+    while (k < PI_np) {
+        var row = PI_pw + k * 40;
+        var pl = dpo_pair_loss(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4), DPO_BETA());
+        lsum = f64_add(lsum, pl);
+        var d = dpo_delta(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4), DPO_BETA());
+        if (f64_gt(d, f64_from(0)) == 1) { right = right + 1; }
+        k = k + 1;
+    }
+    store64(acc_out, right);
+    return f64_div(lsum, f64_from(PI_np));
+}
+
+fn _pi_ipo_eval(acc_out): i64 {
+    var lsum = f64_from(0);
+    var right = 0;
+    var k = 0;
+    while (k < PI_np) {
+        var row = PI_pw + k * 40;
+        var pl = ipo_pair_loss(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4), IPO_BETA());
+        lsum = f64_add(lsum, pl);
+        var h = ipo_h(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4));
+        if (f64_gt(h, f64_from(0)) == 1) { right = right + 1; }
+        k = k + 1;
+    }
+    store64(acc_out, right);
+    return f64_div(lsum, f64_from(PI_np));
+}
+
+# mean KTO log-ratio split by label: out cells get (mean_desirable, mean_undesirable)
+fn _pi_kto_sep(mD_out, mU_out): i64 {
+    var sD = f64_from(0); var nD = 0;
+    var sU = f64_from(0); var nU = 0;
+    var k = 0;
+    while (k < PI_nu) {
+        var row = PI_un + k * 32;
+        var lg = kto_logratio(load64(row), load64(row + 8), load64(row + 16));
+        if (load64(row + 24) == 1) { sD = f64_add(sD, lg); nD = nD + 1; }
+        else { sU = f64_add(sU, lg); nU = nU + 1; }
+        k = k + 1;
+    }
+    if (nD > 0) { store64(mD_out, f64_div(sD, f64_from(nD))); } else { store64(mD_out, f64_from(0)); }
+    if (nU > 0) { store64(mU_out, f64_div(sU, f64_from(nU))); } else { store64(mU_out, f64_from(0)); }
+    return 0;
+}
+
+# detached KTO reference point z = clamp₀(mean log-ratio over the ingested set)
+fn _pi_kto_z(): i64 {
+    var zsum = f64_from(0);
+    var k = 0;
+    while (k < PI_nu) {
+        var row = PI_un + k * 32;
+        zsum = f64_add(zsum, kto_logratio(load64(row), load64(row + 8), load64(row + 16)));
+        k = k + 1;
+    }
+    var z = f64_div(zsum, f64_from(PI_nu));
+    if (f64_lt(z, f64_from(0)) == 1) { z = f64_from(0); }
+    return z;
+}
+
+# ---- training loops (full-batch over the ingested rows, mirrors dpo_train) -----
+fn _pi_train_pairs(epochs, lr, use_ipo): i64 {
+    var invN = f64_div(f64_from(1), f64_from(PI_np));
+    var e = 0;
+    while (e < epochs) {
+        pol_zero_grads();
+        var k = 0;
+        while (k < PI_np) {
+            var row = PI_pw + k * 40;
+            var n = _pi_r(row, 4);
+            if (use_ipo == 1) {
+                ipo_backward_pair(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), n, IPO_BETA());
+            } else {
+                dpo_backward_pair(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), n, DPO_BETA());
+            }
+            k = k + 1;
+        }
+        t_scale(G_E, g_V * g_D, invN);
+        t_scale(G_W, g_D * g_V, invN);
+        t_scale(G_b, g_V, invN);
+        pol_adam_step(lr);
+        e = e + 1;
+    }
+    return 0;
+}
+
+fn _pi_train_kto(epochs, lr): i64 {
+    var invN = f64_div(f64_from(1), f64_from(PI_nu));
+    var e = 0;
+    while (e < epochs) {
+        var z = _pi_kto_z();                          # detached, per-epoch
+        pol_zero_grads();
+        var k = 0;
+        while (k < PI_nu) {
+            var row = PI_un + k * 32;
+            kto_backward_example(load64(row), load64(row + 8), load64(row + 16), load64(row + 24),
+            KTO_BETA(), KTO_LAMBDA_D(), KTO_LAMBDA_U(), z);
+            k = k + 1;
+        }
+        t_scale(G_E, g_V * g_D, invN);
+        t_scale(G_W, g_D * g_V, invN);
+        t_scale(G_b, g_V, invN);
+        pol_adam_step(lr);
+        e = e + 1;
+    }
+    return 0;
+}
+
+# ---- the driver: tarka --pref <prefs.jsonl> ------------------------------------
+fn tarka_pref_ingest(path): i64 {
+    var buf = alloc(PI_FMAX() + 1);
+    var flen = file_read_all(path, buf, PI_FMAX());
+    if (flen <= 0) {
+        _pi_puts("tarka: cannot read preference file: "); _pi_puts(path); _pi_puts("\n");
+        return 1;
+    }
+    _pi_puts("tarka preference ingestion (ifran pref-export JSONL)\n  file: ");
+    _pi_puts(path); _pi_puts(" ("); fmt_int(flen); _pi_puts(" bytes)\n");
+
+    # byte vocab over the whole file -> every field tokenizes; fresh policy
+    var V = corpus_set(buf, flen);
+    pol_init(V, 8, 16, 0, 4242);
+    dpo_init();
+    dpo_snapshot();                                   # theta == ref at start
+    var total = pref_ingest_file(buf, flen);
+    _pi_puts("  vocab="); fmt_int(V);
+    _pi_puts("  pairs="); fmt_int(PI_np);
+    _pi_puts("  unary="); fmt_int(PI_nu);
+    _pi_puts("  skipped="); fmt_int(PI_skipped); _pi_puts("\n");
+    if (total < 1) { _pi_puts("tarka: nothing ingested\n"); return 1; }
+
+    var fails = 0;
+    var accp = alloc(8);
+    var lr = f64_div(f64_from(5), f64_from(100));
+
+    if (PI_np > 0) {
+        # ---- DPO over the ingested pairs ----
+        var l0 = _pi_dpo_eval(accp);
+        var a0 = load64(accp);
+        _pi_puts("\n--- DPO on "); fmt_int(PI_np); _pi_puts(" ingested pairs ---\n");
+        _pi_puts("  before: mean loss "); _pi_f2(l0);
+        _pi_puts("  ranked-correct "); fmt_int(a0); _pi_puts("/"); fmt_int(PI_np); _pi_puts("\n");
+        _pi_train_pairs(300, lr, 0);
+        var l1 = _pi_dpo_eval(accp);
+        var a1 = load64(accp);
+        _pi_puts("  after:  mean loss "); _pi_f2(l1);
+        _pi_puts("  ranked-correct "); fmt_int(a1); _pi_puts("/"); fmt_int(PI_np); _pi_puts("\n");
+        if (a1 < PI_np) { fails = fails + 1; _pi_puts("  GATE FAIL: not all pairs ranked correctly\n"); }
+        if (f64_lt(l1, l0) == 0) { fails = fails + 1; _pi_puts("  GATE FAIL: DPO loss did not decrease\n"); }
+
+        # ---- IPO over the same pairs (fresh policy) ----
+        pol_init(V, 8, 16, 0, 777);
+        dpo_snapshot();
+        var i0 = _pi_ipo_eval(accp);
+        var b0 = load64(accp);
+        _pi_puts("--- IPO on the same pairs (fresh policy) ---\n");
+        _pi_puts("  before: mean loss "); _pi_f2(i0);
+        _pi_puts("  ranked-correct "); fmt_int(b0); _pi_puts("/"); fmt_int(PI_np); _pi_puts("\n");
+        _pi_train_pairs(300, lr, 1);
+        var i1 = _pi_ipo_eval(accp);
+        var b1 = load64(accp);
+        _pi_puts("  after:  mean loss "); _pi_f2(i1);
+        _pi_puts("  ranked-correct "); fmt_int(b1); _pi_puts("/"); fmt_int(PI_np); _pi_puts("\n");
+        if (b1 < PI_np) { fails = fails + 1; _pi_puts("  GATE FAIL: not all pairs ranked correctly (IPO)\n"); }
+        if (f64_lt(i1, i0) == 0) { fails = fails + 1; _pi_puts("  GATE FAIL: IPO loss did not decrease\n"); }
+    }
+
+    if (PI_nu > 0) {
+        # ---- KTO over the unary thumbs (fresh policy) ----
+        pol_init(V, 8, 16, 0, 991);
+        dpo_snapshot();
+        var mD = alloc(8); var mU = alloc(8);
+        _pi_kto_sep(mD, mU);
+        var sep0 = f64_sub(load64(mD), load64(mU));
+        _pi_puts("--- KTO on "); fmt_int(PI_nu); _pi_puts(" unary thumbs (fresh policy) ---\n");
+        _pi_puts("  before: mean log-ratio desirable-undesirable gap "); _pi_f2(sep0); _pi_puts("\n");
+        _pi_train_kto(300, lr);
+        _pi_kto_sep(mD, mU);
+        var sep1 = f64_sub(load64(mD), load64(mU));
+        _pi_puts("  after:  gap "); _pi_f2(sep1); _pi_puts("\n");
+        if (f64_gt(sep1, sep0) == 0) { fails = fails + 1; _pi_puts("  GATE FAIL: KTO gap did not widen\n"); }
+    }
+
+    if (fails == 0) {
+        _pi_puts("\nRESULT: preference ingestion PASS (all gates green)\n");
+        return 0;
+    }
+    _pi_puts("\nRESULT: preference ingestion FAIL ("); fmt_int(fails); _pi_puts(" gates)\n");
+    return 1;
+}

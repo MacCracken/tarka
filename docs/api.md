@@ -1,4 +1,4 @@
-# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1)
+# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2)
 
 > Satisfies the v1.0 criterion *"Public RL/reasoning API frozen — every exported symbol
 > documented and tested."*
@@ -101,6 +101,23 @@ KTO two-sided z-detachment falsifier.
 
 **Not frozen (internal mechanism):** `kto_zref_raw`, `kto_example_loss_live` (the detachment-falsifier
 forward), `ipo_bufs`/`kto_bufs`.
+
+## Preference-file ingestion — `src/pref_ingest.cyr` (added v1.1.2, additive)
+
+The ifran-Lane-3 data path: train the preference losses from a curated
+`ifran pref export` JSONL file instead of on-policy rollouts. No new gradient
+math — the FD-gated `dpo_backward_pair` / `ipo_backward_pair` /
+`kto_backward_example` primitives above do the training.
+
+| symbol | purpose | tested by |
+|--------|---------|-----------|
+| `tarka --pref <prefs.jsonl>` (CLI) | ingest + train + gate DPO/IPO/KTO from an ifran preference export; exit 0 = all gates green | e2e proof, demo |
+| `tarka_pref_ingest(path)` → i64 | the driver behind the flag | suite |
+| `pref_ingest_file(buf, flen)` → i64 | parse JSONL lines into the pair/unary tables (corpus + policy must be initialized); returns rows ingested | suite |
+| `PI_NMAX()` `PI_MAXEX()` `PI_FMAX()` | caps: 48 (state,action) pairs/sequence · 256 rows/kind · 1 MB file | suite |
+
+**Not frozen (internal mechanism):** `_pi_*` (unescape, tokenize, sequence
+shaping, eval/train loops, row accessors) and the `PI_*` tables.
 
 ## Parity task + sample-efficiency benchmark — `src/parity.cyr`
 

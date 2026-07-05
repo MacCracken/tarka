@@ -15,6 +15,7 @@ include "src/preference_ext.cyr"  # IPO (margin-regularized) + KTO (unpaired pro
 include "src/preference.cyr"  # reward-model transmission demo (learned reward -> RL -> true reward)
 include "src/reasoning.cyr"  # verifier-guided reasoning (self-consistency, best-of-N)
 include "src/search.cyr"     # PRM-guided tree (beam) search on a sequential task
+include "src/pref_ingest.cyr"  # ifran pref-export JSONL ingestion (--pref): DPO/IPO/KTO from curated sets
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -53,6 +54,18 @@ fn print_cd(v): i64 {
 
 fn main(): i64 {
     alloc_init();
+    # --pref <prefs.jsonl>: train DPO/IPO/KTO from an ifran-curated preference
+    # export instead of running the demo suite (ifran Lane 3; src/pref_ingest.cyr)
+    args_init();
+    if (argc() >= 2) {
+        if (streq(argv(1), "--pref") == 1) {
+            if (argc() < 3) {
+                puts("tarka: --pref needs a <prefs.jsonl> (ifran `pref export` file)\n");
+                return 1;
+            }
+            return tarka_pref_ingest(argv(2));
+        }
+    }
     # real tokenized corpus via akshara (byte-level vocab over a short text)
     var corpus = "the quick brown fox jumps over the lazy dog. ";
     var clen = 0; while (load8(corpus + clen) != 0) { clen = clen + 1; }

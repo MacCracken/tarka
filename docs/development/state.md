@@ -5,6 +5,16 @@
 
 ## Version
 
+**1.1.2** — 2026-07-05. **Preference-file ingestion (`--pref`) — ifran Lane 3 closes** (`src/pref_ingest.cyr`).
+`tarka --pref <prefs.jsonl>` trains DPO/IPO/KTO from an ifran `pref export` (curated preferences in,
+aligned policy out): bayan flat-JSON parse per line (+ escape handling; embedded-quote rows skip loudly —
+bayan's parser doesn't honor `\"`), akshara byte vocab over the whole file, bigram (state, action) spans
+over completion-given-prompt, full-batch training via the EXISTING FD-gated primitives (no new gradient
+math). Caps 48 pairs/seq · 256 rows/kind · 1 MB. E2E proof on a real ifran-curated set (3 pairs +
+4 thumbs): 7/7 ingested, DPO loss 0.69→0.00 ranked **3/3**, IPO 1.00→0.00 **3/3**, KTO gap 0→**237.78** —
+all gates green, demo suite regression clean. Suite **50 → 73** (`tests/pref_ingest.tcyr`); stdlib
+`bayan` added to the manifest. Additive — the frozen surface unchanged. Pin 6.2.37.
+
 **1.1.1** — 2026-06-27. **IPO + KTO — completing the standard preference-loss set** (`src/preference_ext.cyr`),
 on the same frozen-reference machinery as DPO (1.1.0). **IPO** (Azar 2024) regresses the bare implicit-reward
 margin `h` toward a FINITE target `1/(2β)` via `L=(h−1/(2β))²` (pulls `h` back if it overshoots, where DPO

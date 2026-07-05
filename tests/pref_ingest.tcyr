@@ -1,0 +1,102 @@
+# tarka — preference-ingestion tests (ifran Lane 3, src/pref_ingest.cyr):
+# JSONL parse/skip behavior, unescape, sequence shaping, and a mini DPO train
+# gate over an ingested pair. Stdlib auto-included via cyrius.cyml.
+
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "lib/akshara.cyr"
+include "src/rl.cyr"
+include "src/actorcritic.cyr"
+include "src/reward.cyr"
+include "src/dpo.cyr"
+include "src/preference_ext.cyr"
+include "src/pref_ingest.cyr"
+
+# akshara consumer symbols unused on the pure tokenizer path — stub for a clean build
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+fn test_unescape(): i64 {
+    var lenp = alloc(8);
+    var out = _pi_unescape(str_from("a\\nb\\\"c\\\\d"), lenp);
+    assert_eq(load64(lenp), 7, "unescaped length");
+    assert_eq(load8(out), 97, "a");
+    assert_eq(load8(out + 1), 10, "\\n -> LF");
+    assert_eq(load8(out + 2), 98, "b");
+    assert_eq(load8(out + 3), 34, "\\\" -> quote");
+    assert_eq(load8(out + 4), 99, "c");
+    assert_eq(load8(out + 5), 92, "\\\\ -> backslash");
+    assert_eq(load8(out + 6), 100, "d");
+    return 0;
+}
+
+fn test_seq_shape(): i64 {
+    var corpus = "abcdef";
+    corpus_set(corpus, 6);
+    var st = t_alloc(PI_NMAX());
+    var ac = t_alloc(PI_NMAX());
+    # prompt "ab", completion "cd": states=[b,c] actions=[c,d]
+    var n = _pi_seq("ab", 2, "cd", 2, st, ac);
+    assert_eq(n, 2, "prompted seq n = completion len");
+    assert_eq(load64(st), load64(g_char2id + 98 * 8), "state0 = last prompt token");
+    assert_eq(load64(ac), load64(g_char2id + 99 * 8), "action0 = first completion token");
+    assert_eq(load64(st + 8), load64(g_char2id + 99 * 8), "state1 = completion[0]");
+    assert_eq(load64(ac + 8), load64(g_char2id + 100 * 8), "action1 = completion[1]");
+    # prompt-less: bigrams of the completion only (n-1)
+    var n2 = _pi_seq("", 0, "abc", 3, st, ac);
+    assert_eq(n2, 2, "prompt-less seq n = len-1");
+    # empty completion unusable
+    assert_eq(_pi_seq("ab", 2, "", 0, st, ac), 0, "empty completion -> 0");
+    return 0;
+}
+
+fn test_ingest_and_train(): i64 {
+    var l1 = "{\"kind\":\"pair\",\"prompt\":\"q\",\"chosen\":\"good answer\",\"rejected\":\"bad reply\"}\n";
+    var l2 = "{\"kind\":\"unary\",\"prompt\":\"p\",\"completion\":\"nice one\",\"label\":1}\n";
+    var l3 = "{\"kind\":\"unary\",\"prompt\":\"p\",\"completion\":\"awful\",\"label\":-1}\n";
+    var l4 = "{\"kind\":\"unary\",\"prompt\":\"p\",\"completion\":\"x\",\"label\":7}\n";       # bad label -> skip
+    var l5 = "not json at all\n";                                                            # junk -> skip
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, l1);
+    str_builder_add_cstr(sb, l2);
+    str_builder_add_cstr(sb, l3);
+    str_builder_add_cstr(sb, l4);
+    str_builder_add_cstr(sb, l5);
+    var body = str_builder_build(sb);
+    var buf = str_data(body);
+    var flen = str_len(body);
+
+    var V = corpus_set(buf, flen);
+    pol_init(V, 8, 16, 0, 4242);
+    dpo_init();
+    dpo_snapshot();
+    var total = pref_ingest_file(buf, flen);
+    assert_eq(PI_np, 1, "one pair ingested");
+    assert_eq(PI_nu, 2, "two unary rows ingested");
+    assert_eq(PI_skipped, 2, "bad-label + junk rows skipped");
+    assert_eq(total, 3, "total ingested");
+    var row = PI_pw;
+    assert_eq(load64(row + 32), 9, "pair n = min(chosen 11, rejected 9)");
+    var urow = PI_un + 32;
+    assert_eq(load64(urow + 24), 0 - 1, "second unary label -1");
+
+    # mini DPO train over the single ingested pair: Δ goes 0 -> positive
+    var d0 = dpo_delta(load64(row), load64(row + 8), load64(row + 16), load64(row + 24), load64(row + 32), DPO_BETA());
+    assert(f64_lt(f64_abs(d0), f64_div(f64_from(1), f64_from(1000000))) == 1, "theta==ref at start: delta 0");
+    _pi_train_pairs(60, f64_div(f64_from(5), f64_from(100)), 0);
+    var d1 = dpo_delta(load64(row), load64(row + 8), load64(row + 16), load64(row + 24), load64(row + 32), DPO_BETA());
+    assert(f64_gt(d1, f64_from(0)) == 1, "after DPO train: chosen ranked above rejected");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_unescape();
+    test_seq_shape();
+    test_ingest_and_train();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

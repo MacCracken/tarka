@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-07-05
+
+**Preference-file ingestion (`--pref`) — the ifran preference path closes (Lane 3).**
+tarka's preference optimizers can now train from a CURATED file instead of on-policy
+synthetic rollouts: the ingestion end of ifran's `pref export` JSONL. Additive to the
+frozen 1.x API — a data path, no new gradient math (the existing FD-gated
+`dpo_backward_pair` / `ipo_backward_pair` / `kto_backward_example` do the training).
+
+### Added
+- **`tarka --pref <prefs.jsonl>`** (`src/pref_ingest.cyr`) — read an ifran
+  `pref export` file (one JSON object per line: `pair` prompt/chosen/rejected;
+  `unary` prompt/completion/label ±1), build an akshara byte vocab over the whole
+  file (every field tokenizes), parse lines with bayan's flat JSON parser
+  (+ `\n`/`\t`/`\r`/`\\`/`\"` unescape), shape bigram (state, action) spans over
+  the completion given its prompt context, then train + gate full-batch:
+  **DPO** (mean pair loss down + every pair ranked Δ>0), **IPO** (same, fresh
+  policy, squared-margin loss), **KTO** (desirable−undesirable mean log-ratio gap
+  widens; detached per-epoch z). Caps: 48 (state,action) pairs/sequence,
+  256 rows/kind, 1 MB file; pairs truncate to the shared min (single-n primitive).
+- **`tests/pref_ingest.tcyr`** (23, suite 50→**73**) — unescape bytes, sequence
+  shaping (prompted/prompt-less/empty), ingest counts incl. bad-label + junk-line
+  skips, pair-n min rule, and a mini DPO train gate (Δ: 0 → positive) over an
+  ingested pair.
+- **stdlib `bayan`** added to `cyrius.cyml` (the JSON parse side).
+
+### Proof (end-to-end with ifran 2.0.0)
+`ifran pref new/pair/good/bad` (3 pairs + 4 thumbs) → `pref export` → 
+`tarka --pref prefs.jsonl`: 7/7 rows ingested, 0 skipped — **DPO loss 0.69→0.00,
+ranked 0/3→3/3 · IPO loss 1.00→0.00, ranked 0/3→3/3 · KTO gap 0.00→237.78.
+PASS (all gates green).**
+
+### Known limitation (documented in the module header)
+bayan's flat JSON parser scans quoted strings to the next `"` without honoring
+`\"` escapes — a row whose text contains a double-quote mis-parses and is
+counted (loudly) as skipped. ifran escapes on export; an escape-aware bayan
+parse is the upstream fix if such rows ever matter.
+
 ## [1.1.1] - 2026-06-27
 
 **IPO + KTO — completing the standard preference-loss set.** Two more preference-optimization losses

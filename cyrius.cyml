@@ -13,7 +13,7 @@ test = "src/test.cyr"
 output = "build/tarka"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math", "args"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math", "args", "bayan"]
 
 # tarka is a SIBLING consumer of the same f64 tensor substrate attn11 uses, not a
 # chain on top of attn11-the-binary. The policy/value networks reassemble from

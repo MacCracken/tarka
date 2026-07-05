@@ -122,8 +122,11 @@ the remaining versions are about finish quality.
   - **KL-to-reference penalty** (Ouyang 2022 / TRL `init_kl_coef`): `β·KL(π_θ‖π_ref)`,
     `dKL/dlogit_k = p_k·(f_k − KL)`. Demo: pulls mean KL **3.33 → 2.46**.
   - Surfaced by the 2026-06-25 ifran/secureyeoman product-mining (both ship DPO/RLHF as Python
-    wrappers — demand evidence). Follow-ons not yet evidenced/built: IPO/KTO direct-preference
-    variants.
+    wrappers — demand evidence). The IPO/KTO follow-ons shipped in **1.1.1** (2026-06-27,
+    `src/preference_ext.cyr`) — the standard preference-loss set is complete.
+  - **1.1.2 (2026-07-05): `--pref` preference-file ingestion** (`src/pref_ingest.cyr`) — trains
+    DPO/IPO/KTO from an ifran `pref export` JSONL (curated preferences in, aligned policy out;
+    ifran Lane 3 closed). E2E proven: DPO/IPO ranked 3/3 with loss → 0, KTO gap 0 → 238.
 
 ## Out of scope (for v1.0)
 
