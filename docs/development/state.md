@@ -98,8 +98,10 @@ scaffold.) **M1 closed** at attn11 1.11.1.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.37` (in `cyrius.cyml [package].cyrius`) — bumped from 6.2.36 at
+- **Cyrius pin**: `6.5.27` (in `cyrius.cyml [package].cyrius`) — bumped from 6.2.36 at
   0.8.0; matches the installed toolchain (no drift warning); same 6.2.x band attn11/rosnet consume.
+
+**Pin bumped to `6.5.27` 2026-08-17** (ecosystem-wide ML/AI-arc realign, ahead of the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib snapshot; suite re-verified green at the new pin.
 
 ## Source
 

@@ -4,6 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-08-18
+
+### Changed
+
+- **Cyrius pin `6.2.37` -> `6.5.27`** (2026-08-17, ecosystem-wide ML/AI-arc realign ahead of
+  the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
+  snapshot, clearing the toolchain-drift and `./lib/ shadows version-pinned` warnings.
+  Suite green at the new pin, identical to the pre-bump baseline; the frozen surface is untouched.
+
+- **Substrate dependency set brought current: `tyche` 0.1.1 -> 1.0.1, `rosnet` 0.2.0 -> 1.1.1,
+  `akshara` 0.1.0 -> 1.0.2.** All three cut **1.0.0** in early July and froze their public surfaces;
+  no consumer had moved off the pre-1.0 tags, so the freeze was real and its propagation was not.
+  tarka sits in the last release wave, downstream of all three. This is a tag realign with no behavior change — every symbol
+  tarka calls is inside the frozen sets. Verified each bump took rather than merely built: vendored
+  `lib/tyche.cyr` at `1.0.1`, `lib/rosnet.cyr` at `1.1.1`, `lib/akshara.cyr` at `1.0.2`.
+  Suite **73/73**, unchanged.
+
 ## [1.1.2] - 2026-07-05
 
 **Preference-file ingestion (`--pref`) — the ifran preference path closes (Lane 3).**
