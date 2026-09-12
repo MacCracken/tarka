@@ -307,7 +307,7 @@ fn _pi_train_kto(epochs, lr): i64 {
         while (k < PI_nu) {
             var row = PI_un + k * 32;
             kto_backward_example(load64(row), load64(row + 8), load64(row + 16), load64(row + 24),
-            KTO_BETA(), KTO_LAMBDA_D(), KTO_LAMBDA_U(), z);
+              KTO_BETA(), KTO_LAMBDA_D(), KTO_LAMBDA_U(), z);
             k = k + 1;
         }
         t_scale(G_E, g_V * g_D, invN);

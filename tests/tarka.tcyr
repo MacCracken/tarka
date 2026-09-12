@@ -269,7 +269,7 @@ fn main() {
         var vn = f64_from(0);
         if (gt < g_T - 1) { vn = load64(R_values + (gt + 1) * 8); }
         store64(dbuf + gt * 8, f64_sub(f64_add(load64(R_rewards + gt*8), f64_mul(GAMMA(), vn)),
-                                       load64(R_values + gt*8)));
+            load64(R_values + gt*8)));
         gt = gt + 1;
     }
     var mrGae = f64_from(0); gt = 0;
@@ -457,7 +457,7 @@ fn main() {
     var ih1 = ipo_h(istW, iacW, istL, iacL, 2);
     assert((f64_is_finite(ih0) == 1) && (f64_is_finite(ih1) == 1), "IPO h finite");
     assert(f64_lt(f64_abs(f64_sub(ih1, im)), f64_abs(f64_sub(ih0, im))) == 1,
-           "IPO step moves h toward target margin (|h−m| decreases)");
+      "IPO step moves h toward target margin (|h−m| decreases)");
 
     test_group("KTO — unpaired prospect-theoretic loss FD grad-check (detached reference point, both labels)");
     pol_init(8, 4, 2, 3, 99); dpo_init();          # V=8 D=4, example length n=2
@@ -497,7 +497,7 @@ fn main() {
     show("  KTO z-detached FD maxrel = ", mrDet); show("  KTO z-LIVE FD maxrel = ", mrLive);
     assert(f64_lt(mrDet, TOL()), "KTO detached-z FD matches analytic (z constant)");
     assert(f64_gt(mrLive, f64_div(f64_from(1), f64_from(1000))) == 1,
-           "KTO live-z FD DIVERGES (>1e-3) — analytic grad is the z-detached one");
+      "KTO live-z FD DIVERGES (>1e-3) — analytic grad is the z-detached one");
     # ---- direction falsifier: a descent step RAISES ρ for a desirable example ----
     var krd0 = kto_logratio(kst, kac, 2);
     pol_zero_grads(); kto_backward_example(kst, kac, 2, 1, ktbeta, klamD, klamU, kz);

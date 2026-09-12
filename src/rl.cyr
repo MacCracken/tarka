@@ -266,7 +266,7 @@ fn rl_train(steps, batch, lr, log_every): i64 {
         pol_adam_step(lr);
         meanR = f64_mul(rsum, invB);
         g_baseline = f64_add(f64_mul(RL_BETA(), g_baseline),
-                             f64_mul(f64_sub(f64_from(1), RL_BETA()), meanR));
+          f64_mul(f64_sub(f64_from(1), RL_BETA()), meanR));
         s = s + 1;
     }
     return meanR;

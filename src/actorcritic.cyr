@@ -140,7 +140,7 @@ fn gae_advantages(): i64 {
         var vnext = f64_from(0);
         if (t < g_T - 1) { vnext = load64(R_values + (t + 1) * 8); }
         var delta = f64_sub(f64_add(load64(R_rewards + t * 8), f64_mul(GAMMA(), vnext)),
-                            load64(R_values + t * 8));
+          load64(R_values + t * 8));
         A = f64_add(delta, f64_mul(GLAM(), A));
         store64(R_adv + t * 8, A);
         store64(R_ret + t * 8, f64_add(A, load64(R_values + t * 8)));   # critic target

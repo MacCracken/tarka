@@ -228,7 +228,7 @@ fn kto_train(steps, batch, lr): i64 {
             var lab = 0 - 1;
             if (f64_gt(load64(KA_cnt + bi * 8), meanc) == 1) { lab = 1; }    # above-mean ⇒ desirable
             kto_backward_example(KA_st + bi * g_T * 8, KA_ac + bi * g_T * 8, g_T, lab,
-                                 KTO_BETA(), KTO_LAMBDA_D(), KTO_LAMBDA_U(), z);
+              KTO_BETA(), KTO_LAMBDA_D(), KTO_LAMBDA_U(), z);
             bi = bi + 1;
         }
         t_scale(G_E, g_V * g_D, invB); t_scale(G_W, g_D * g_V, invB); t_scale(G_b, g_V, invB);
