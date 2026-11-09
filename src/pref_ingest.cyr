@@ -126,7 +126,7 @@ fn _pi_seq(ptxt, plen, ctxt, clen, st, ac): i64 {
 
 # fetch a string field: unescaped bytes + length via out cells. 0 = absent.
 fn _pi_field(pairs, key, out_len): i64 {
-    var v = bayan_json_get(pairs, str_from(key));
+    var v = bayan_json_get_by_str(pairs, str_from(key));
     if (v == 0) { return 0; }
     return _pi_unescape(v, out_len);
 }
@@ -135,7 +135,7 @@ fn _pi_field(pairs, key, out_len): i64 {
 fn _pi_line(ld, ll): i64 {
     var pairs = bayan_json_parse(str_new(ld, ll));
     if (pairs == 0) { return 0; }
-    var kind = bayan_json_get(pairs, str_from("kind"));
+    var kind = bayan_json_get_by_str(pairs, str_from("kind"));
     if (kind == 0) { return 0; }
     var plen = alloc(8);
     var p = _pi_field(pairs, "prompt", plen);
@@ -167,7 +167,7 @@ fn _pi_line(ld, ll): i64 {
         var klen = alloc(8);
         var comp = _pi_field(pairs, "completion", klen);
         if (comp == 0) { return 0; }
-        var lab = bayan_json_get_int(pairs, str_from("label"));
+        var lab = bayan_json_get_int_by_str(pairs, str_from("label"));
         if (lab != 1) { if (lab != (0 - 1)) { return 0; } }   # ±1 only (ifran's contract)
         var st = t_alloc(PI_NMAX()); var ac = t_alloc(PI_NMAX());
         var n = _pi_seq(p, load64(plen), comp, load64(klen), st, ac);

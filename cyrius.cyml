@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "tarka — sovereign reasoning & reinforcement-learning reference in Cyrius (the agency counterpoint to attn11)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 repository = "https://github.com/MacCracken/tarka"
 
 [build]
@@ -22,10 +22,10 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 # the attn11 REINFORCE migration plan (M1).
 
 # Deterministic statistical PRNG — rollout sampling (on-policy action draws) and
-# weight init. Pinned to 1.2.0 — the 6.7.9-built release rosnet 1.2.0 consumes.
+# weight init. Pinned to 1.2.2 — the latest release, and the one rosnet 1.4.1 consumes.
 [deps.tyche]
 git = "https://github.com/MacCracken/tyche"
-tag = "1.2.0"
+tag = "1.2.2"
 modules = ["dist/tyche.cyr"]
 
 # Dense f64 tensor algebra (the BLAS substrate): storage, BLAS-1, matmul + gradient.
@@ -34,7 +34,7 @@ modules = ["dist/tyche.cyr"]
 # NOTE: rosnet's t_randn calls tyche's rng_normal — the [deps.tyche] above resolves it.
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet"
-tag = "1.2.0"
+tag = "1.4.1"
 modules = ["dist/rosnet.cyr"]
 
 # Sovereign tokenizer (byte vocab + BPE + packed token store) — the text→token-id
@@ -46,5 +46,5 @@ modules = ["dist/rosnet.cyr"]
 # come from [deps.rosnet] above. One tokenizer, shared with attn11.
 [deps.akshara]
 git = "https://github.com/MacCracken/akshara"
-tag = "1.1.0"
+tag = "1.1.2"
 modules = ["dist/akshara.cyr"]

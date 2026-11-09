@@ -5,6 +5,16 @@
 
 ## Version
 
+**1.2.1** — 2026-11-09. **Realign to the latest releases, plus the deprecated-getter migration.** Pin `6.7.9` → `6.7.18`;
+tyche 1.2.0 → **1.2.2**, rosnet 1.2.0 → **1.4.1**, akshara 1.1.0 → **1.1.2** (each bit-identical on valid
+input; akshara still pins rosnet 1.2.2, and the two rosnet functions it calls, `t_alloc` and `t_zero`,
+are byte-identical in 1.4.1). `lib/` re-synced to the 6.7.18 snapshot; `cyrius.lock` regenerated,
+`deps --verify` 117/117 and `deps --locked` clean. Suite **73/73** unchanged; the demo and test output
+are byte-identical to 1.2.0. The binary grows 1.9× (1,253,928 B), almost all of it the Unicode data
+tables bayan 1.11.1 brings in. `src/pref_ingest.cyr`'s three calls to the JSON getters bayan 1.11.0
+deprecates now use the `_by_str` forms they forwarded to. The build is warning-free, and `--pref`
+output is byte-identical.
+
 **1.2.0** — 2026-11-09. **Onto the cyrius 6.7 series, no source change.** Pin `6.6.20` → `6.7.9`;
 tyche 1.1.1 → **1.2.0**, rosnet 1.1.3 → **1.2.0**, akshara 1.0.4 → **1.1.0** (the 6.7.9-built set,
 one consistent chain, none with a source or value change). tarka's source was checked against 6.7's
@@ -113,13 +123,15 @@ scaffold.) **M1 closed** at attn11 1.11.1.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`), the same pin the substrate's
-  1.2.0 / 1.2.0 / 1.1.0 releases build against. `lib/` byte-matches the 6.7.9 snapshot, so there
-  is no shadow warning.
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`), the latest release and the pin
+  tyche 1.2.2 / rosnet 1.4.1 / akshara 1.1.2 build against. `lib/` byte-matches the 6.7.18 snapshot,
+  so there is no shadow warning.
 
 **Pin history:** 6.2.36 → 6.2.37 (0.8.0) → 6.5.27 (1.1.3, 2026-08-17) → 6.6.2 (1.1.4, 2026-09-11) →
-6.6.20 (1.1.5, 2026-11-09) → **6.7.9 (1.2.0, 2026-11-09)**. Each bump re-ran `cyrius lib sync --full`
-and re-verified the suite at the new pin. From 6.6.20, bare `cyrius test` also runs the `[build].test`
+6.6.20 (1.1.5, 2026-11-09) → 6.7.9 (1.2.0, 2026-11-09) → **6.7.18 (1.2.1, 2026-11-09)**. Each bump
+re-ran `cyrius lib sync --full` and re-verified the suite at the new pin. From 6.7.12, a moved pin
+makes `cyrius deps` / `cyrius build` exit 1 until `lib sync --full` runs, so the pin, `lib/` and
+`cyrius.lock` land in one commit. From 6.6.20, bare `cyrius test` also runs the `[build].test`
 stub (`src/test.cyr`), so the runner reports 3 files; `cyrius test tests` runs the two suites only.
 `cyrius tests` is deprecated at 6.7.6 and removed at 6.7.12; tarka never used it.
 
@@ -186,11 +198,11 @@ differences before it lands, inherited from attn11) is **active as of M1**.
 Direct (declared in `cyrius.cyml`):
 
 - **stdlib** — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math, args, bayan
-- **[rosnet](https://github.com/MacCracken/rosnet) 1.2.0** — f64 tensor storage,
+- **[rosnet](https://github.com/MacCracken/rosnet) 1.4.1** — f64 tensor storage,
   BLAS-1, matmul + gradient (CPU bundle). The policy/value networks build on this.
-- **[tyche](https://github.com/MacCracken/tyche) 1.2.0** — deterministic PRNG for
+- **[tyche](https://github.com/MacCracken/tyche) 1.2.2** — deterministic PRNG for
   on-policy rollout sampling + weight init. (rosnet's `t_randn` resolves through it.)
-- **[akshara](https://github.com/MacCracken/akshara) 1.1.0** (wired 0.2.1) — the
+- **[akshara](https://github.com/MacCracken/akshara) 1.1.2** (wired 0.2.1) — the
   sovereign tokenizer (अक्षर); `corpus_set` builds the byte vocab + packed store,
   `gd_ld` indexes it for rollout prompts. Pure path only — loader/streaming/emit
   consumer symbols (`secure_read_file`/`read_stdin`/`file_seek`) are stubbed unreached.

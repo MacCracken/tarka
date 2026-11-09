@@ -4,6 +4,113 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-09
+
+A toolchain and dependency realign to the latest releases. Its one source change moves
+three calls off the bayan JSON getters that the new stdlib deprecates.
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`** (through 6.7.10–6.7.17), the latest cyrius release.
+  Apart from those three calls, `src/` is unchanged, and so is every number tarka prints. The demo's output is
+  byte-identical between 1.2.0 @ 6.7.9 and 1.2.1 @ 6.7.18, every gate number included,
+  and `ALL GATES PASS`. So is the test output, down to each finite-difference `maxrel`.
+  Suite **73/73** unchanged (`tests/tarka.tcyr` 50, `tests/pref_ingest.tcyr` 23).
+  `examples/quickstart.cyr` prints the same output (REINFORCE 1.58 → 23.94). The bench
+  and fuzz harnesses pass, fmt is clean, and `cyrius vet src/main.cyr` reports 0
+  untrusted and 0 missing. Lint warns only about long lines, as under 6.6.2 and 6.7.9:
+  5 in `src/` and 9 in `tests/tarka.tcyr`. 6.7.11's and 6.7.12's new overrun,
+  write-length and array-sizing rules fire on nothing.
+
+  Upstream changes checked against tarka's source (`src/`, `tests/`, `examples/`), from
+  the 6.7.10–6.7.18 sections of cyrius's `ecosystem-migration.md`. Nearly all of it
+  concerns structs, generics, traits, vectors, multi-value returns, `Str` shapes,
+  net/TLS/threads and platform ports, which tarka does not use. The rest:
+  - **6.7.11** refuses a top-level `return` and stops running `main` twice in a program
+    with no explicit exit. tarka has no top-level `return`, and every entry ends with an
+    explicit exit (`sys_exit` or `syscall`).
+  - **6.7.12 / 6.7.13**: in a project that vendors the whole snapshot, a moved pin makes
+    `cyrius deps` and `cyrius build` exit 1 until `cyrius lib sync --full` runs. This
+    release ran it first. The pin, `lib/` and `cyrius.lock` must land in one commit, or
+    CI's `cyrius deps` fails.
+  - **6.7.14–6.7.16** change how constant global initializers, redeclared declaration-zone
+    globals, float literals and typed `f64` globals behave, and **6.7.13**'s RC-4 changes
+    an integer comparison or bit-op with an `f64` right operand. tarka has no float
+    literal, no typed declaration, no global redeclared within one program, and does its
+    float math through explicit `f64_*` builtins on untyped words.
+  - **6.7.17** refuses an include line with code after the file name, and a statement
+    that is only a value builtin. tarka's includes carry only a trailing `#` comment, and
+    its `load64(…)` / `f64_*(…)` lines that start a line are arguments continuing a call.
+    The build confirms both.
+- **The substrate set moves to the latest releases:** `tyche` 1.2.0 → **1.2.2**, `rosnet`
+  1.2.0 → **1.4.1**, `akshara` 1.1.0 → **1.1.2**. All three keep their frozen 1.x
+  surfaces, and each records its outputs on valid input as bit-identical to the release
+  before.
+  - **tyche 1.2.2** (via 1.2.1): `rng_normal` is about 4% faster with the same bits.
+    `rng_uniform` is `#inline`. A written `_rng_state` of 0 no longer hangs `rng_normal`.
+    tarka never writes `_rng_state`.
+  - **rosnet 1.4.1** (via 1.2.1–1.4.0): packed and AVX2 `linear_fwd` / `linear_bwd`,
+    faster `t_scale` / `t_add_into`, and conv rewrites, each keeping its output's
+    sequence of roundings (rosnet's ADR 0002). `t_alloc(0)` now returns an empty tensor
+    instead of exiting, and a negative or wrapping size exits with "invalid size".
+    tarka's `t_alloc` sizes are its config dims, all positive (a 0 would have exited
+    the demo before). The rest of 1.2.2–1.4.0 is the GPU profile, which tarka does not
+    import. The CPU bundle now includes `lib/simd.cyr` itself; tarka vendors the full
+    snapshot, so it is there.
+  - **akshara 1.1.2** (via 1.1.1): a hardening sweep (width validation,
+    `bpe_learn` re-learn refusal, table validation) with faster `bpe_learn` /
+    `tok_encode` / `corpus_set` / `gd_ld`, bit-identical on valid input. Its fatal
+    messages go to stderr, and it no longer needs the consumer's `puts`: the
+    undefined-`puts` warning is gone, and four hooks stay unresolved by design.
+    tarka still defines `puts` for its own output.
+  - **The chain is split by one step, and the toolchain says so:** "rosnet 1.2.2
+    (wanted by akshara) not used; 1.4.1 (the root) resolved first". akshara calls only
+    `t_alloc` and `t_zero` from rosnet, and both functions are byte-identical between
+    rosnet 1.2.2 and 1.4.1.
+  - Vendored `lib/tyche.cyr`, `lib/rosnet.cyr` and `lib/akshara.cyr` byte-match the
+    tagged `dist/` bundles.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the 6.7.18
+  snapshot: the same 113 files as 6.7.9, 66 of them with new content. Nothing was added
+  or removed. `lib/agnosys.cyr` is left as-is.
+- **`cyrius.lock` regenerated from scratch.** One line each for akshara 1.1.2
+  (`b8b3f68`), rosnet 1.4.1 (`af2bb1a`) and tyche 1.2.2 (`cdb74e2`), the same 117 file
+  hashes, trailer `cyrius 6.7.18`. `cyrius deps --verify` (117 verified, 0 failed) and
+  `cyrius deps --locked` are both clean.
+- The `[deps.tyche]` comment in `cyrius.cyml` now names the 1.2.2 pin.
+
+### Note: the binary grows 1.9×, from the stdlib's bayan
+
+The binary grows from 669,424 to 1,253,928 B, and with `CYRIUS_DCE=1` from 165,616 to
+524,840 B. Nearly all of it comes from the snapshot's bayan, which moves from **1.5.13**
+(6.7.9) to **1.11.1** (6.7.18). bayan now includes Unicode 17 data tables
+(`lib/unicode/_casefold_data`, `_categories_data`, `_normalize_data`), and DCE drops
+unused functions but not data. Measured with DCE at 6.7.18:
+
+- An empty `main` under tarka's `[deps] stdlib` is 397,128 B; it was 50,192 B at 6.7.9.
+  Dropping `bayan` from the list brings it to 29,032 B; dropping any other leaf changes
+  it by at most 712 B.
+- Putting back the 6.7.9-era tyche/rosnet/akshara bundles gives 515,376 B, so the dep
+  bumps account for about 9.5 KB.
+
+No tarka code path changed, and the demo's wall-clock time did not move (3.4 s).
+
+### Changed: off bayan's deprecated JSON getters
+
+bayan 1.11.0 deprecates `bayan_json_get` and `bayan_json_get_int`, so the 6.7.18 build
+warned at `src/pref_ingest.cyr:129`, `:138` and `:170`. All three now call the forms the
+deprecated names forward to: `bayan_json_get_by_str` (the `prompt` / `chosen` /
+`rejected` / `completion` fields and `kind`) and `bayan_json_get_int_by_str` (`label`).
+tarka already passed `Str` keys (`str_from(…)`), which is what the `_by_str` forms'
+`key: Str` takes, so the behavior is the same. The build no longer warns, and no
+deprecated bayan call remains in `src/`, `tests/` or `examples/`.
+
+Checked three ways. `tarka --pref` on a 10-line fixture (3 pairs, 4 thumbs, an escaped
+`\t` / `\n` field, a bad label, a non-JSON line, an unknown `kind`) prints output
+byte-identical to the pre-change binary: 7 ingested, 3 skipped, DPO ranked 0/3 → 3/3,
+IPO 0/3 → 3/3, KTO gap 0.00 → 184.78, all gates green. `tests/pref_ingest.tcyr` (23)
+passes with the same output. The binary's size is unchanged, and the two deprecated
+wrappers join the unreachable functions (1,859 → 1,861).
+
 ## [1.2.0] - 2026-11-09
 
 Moves tarka onto the cyrius 6.7 series. No source or API change.
