@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-11-09
+
+A toolchain and dependency realign. No source change.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`** (through 6.6.3–6.6.19). Suite **73/73** unchanged
+  (`tests/tarka.tcyr` 50, `tests/pref_ingest.tcyr` 23). The demo's output is
+  byte-identical to 1.1.4 @ 6.6.2, every gate number included, and `ALL GATES PASS`.
+  `examples/quickstart.cyr` still gives REINFORCE 1.58 → 23.94. The bench and fuzz
+  harnesses pass, and fmt is clean. Lint reports the same 5 long-line warnings
+  (`dpo.cyr` 2, `main.cyr` 1, `preference_ext.cyr` 2) as 6.6.2's cyrlint. The binary
+  grows from 591,744 to 665,344 B, all of it stdlib code that DCE would drop
+  (442,360 → 502,441 B unreachable).
+- **The substrate set moves to its 6.6.20-built releases:** `tyche` 1.0.1 → **1.1.1**,
+  `rosnet` 1.1.1 → **1.1.3**, `akshara` 1.0.2 → **1.0.4**. The chain stays consistent:
+  rosnet 1.1.3 pins tyche 1.1.1, and akshara 1.0.4 pins rosnet 1.1.3. All three
+  frozen 1.x surfaces are unchanged. tyche 1.1.0 changed `rng_normal` to a portable
+  logarithm, which moves 0.011% of x86_64 draws by 1–3 ulp. That reaches tarka through
+  `t_randn` weight init, but no test or demo number moved. Vendored `lib/tyche.cyr`,
+  `lib/rosnet.cyr` and `lib/akshara.cyr` byte-match the tagged `dist/` bundles.
+- **The trimmed sidecars don't affect tarka.** From 6.6.18 the bundles list only the
+  stdlib leaves they provably need: tyche ships no sidecar, rosnet lists 4 leaves and
+  akshara 1. tarka already declares every leaf it uses in its own `[deps] stdlib`, so
+  the build needed no manifest change for this.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the 6.6.20
+  snapshot, 113 files. Five are new: `alloc_cx`, `boxed`, `hashseed`, `poison` and
+  `tls_hostid`. This clears the `./lib/ shadows version-pinned` warning (11 bundled
+  libs) that 1.1.4 carried because it bumped the pin without a full re-sync.
+  `lib/agnosys.cyr`, a scaffold-era file that is in no recent snapshot, is left as-is.
+- **`cyrius.lock` regenerated from scratch.** It has one line each for akshara 1.0.4
+  (`60f56f5`), rosnet 1.1.3 (`5aa4ad7`) and tyche 1.1.1 (`68bb5db`), 117 file hashes,
+  and the toolchain line the 6.6.20 format records (`cyrius 6.6.20`).
+  `cyrius deps --verify` reports 117 verified, 0 failed.
+- The `[deps.tyche]` comment in `cyrius.cyml` named a stale pin (0.1.1). It now names
+  the current one.
+
+### Note: the test runner now runs the `[build].test` stub
+
+At 6.6.20, bare `cyrius test` also runs the `[build].test` entry, `src/test.cyr`, a stub
+that returns 0. The runner now counts 3 files where it counted 2. Compiling the stub
+warns about akshara's five consumer I/O hooks (`file_seek`, `puts`, `secure_read_file`,
+`read_stdin`, `_putc`), because the stub defines none of them. The bench and fuzz builds
+warn the same way. akshara leaves these hooks unresolved by design, and the stub calls
+none of them. The main binary's build reports no undefined functions.
+
 ## [1.1.4] - 2026-09-11
 
 ### Changed
