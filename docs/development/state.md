@@ -5,6 +5,14 @@
 
 ## Version
 
+**1.2.0** — 2026-11-09. **Onto the cyrius 6.7 series, no source change.** Pin `6.6.20` → `6.7.9`;
+tyche 1.1.1 → **1.2.0**, rosnet 1.1.3 → **1.2.0**, akshara 1.0.4 → **1.1.0** (the 6.7.9-built set,
+one consistent chain, none with a source or value change). tarka's source was checked against 6.7's
+language changes (new reserved words, a real `!`, tighter unary `-`/`~`, typed-pointer and `f32`
+semantics): it uses none of them. `lib/` re-synced to the 6.7.9 snapshot; `cyrius.lock` regenerated,
+`deps --verify` 117/117 and `deps --locked` clean. Suite **73/73** unchanged; the demo and test output
+(every FD `maxrel` included) are byte-identical to 1.1.5.
+
 **1.1.5** — 2026-11-09. **Toolchain + substrate realign, no source change.** Pin `6.6.2` → `6.6.20`;
 tyche 1.0.1 → **1.1.1**, rosnet 1.1.1 → **1.1.3**, akshara 1.0.2 → **1.0.4** (the 6.6.20-built set,
 one consistent chain). `lib/` re-synced to the 6.6.20 snapshot (113 files; the shadow warning is gone);
@@ -105,14 +113,15 @@ scaffold.) **M1 closed** at attn11 1.11.1.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`), the same pin the substrate's
-  1.1.1 / 1.1.3 / 1.0.4 releases build against. `lib/` byte-matches the 6.6.20 snapshot, so there
+- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`), the same pin the substrate's
+  1.2.0 / 1.2.0 / 1.1.0 releases build against. `lib/` byte-matches the 6.7.9 snapshot, so there
   is no shadow warning.
 
 **Pin history:** 6.2.36 → 6.2.37 (0.8.0) → 6.5.27 (1.1.3, 2026-08-17) → 6.6.2 (1.1.4, 2026-09-11) →
-**6.6.20 (1.1.5, 2026-11-09)**. Each bump re-ran `cyrius lib sync --full` and re-verified the suite at
-the new pin. From 6.6.20, bare `cyrius test` also runs the `[build].test` stub (`src/test.cyr`), so the
-runner reports 3 files.
+6.6.20 (1.1.5, 2026-11-09) → **6.7.9 (1.2.0, 2026-11-09)**. Each bump re-ran `cyrius lib sync --full`
+and re-verified the suite at the new pin. From 6.6.20, bare `cyrius test` also runs the `[build].test`
+stub (`src/test.cyr`), so the runner reports 3 files; `cyrius test tests` runs the two suites only.
+`cyrius tests` is deprecated at 6.7.6 and removed at 6.7.12; tarka never used it.
 
 ## Source
 
@@ -177,11 +186,11 @@ differences before it lands, inherited from attn11) is **active as of M1**.
 Direct (declared in `cyrius.cyml`):
 
 - **stdlib** — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math, args, bayan
-- **[rosnet](https://github.com/MacCracken/rosnet) 1.1.3** — f64 tensor storage,
+- **[rosnet](https://github.com/MacCracken/rosnet) 1.2.0** — f64 tensor storage,
   BLAS-1, matmul + gradient (CPU bundle). The policy/value networks build on this.
-- **[tyche](https://github.com/MacCracken/tyche) 1.1.1** — deterministic PRNG for
+- **[tyche](https://github.com/MacCracken/tyche) 1.2.0** — deterministic PRNG for
   on-policy rollout sampling + weight init. (rosnet's `t_randn` resolves through it.)
-- **[akshara](https://github.com/MacCracken/akshara) 1.0.4** (wired 0.2.1) — the
+- **[akshara](https://github.com/MacCracken/akshara) 1.1.0** (wired 0.2.1) — the
   sovereign tokenizer (अक्षर); `corpus_set` builds the byte vocab + packed store,
   `gd_ld` indexes it for rollout prompts. Pure path only — loader/streaming/emit
   consumer symbols (`secure_read_file`/`read_stdin`/`file_seek`) are stubbed unreached.

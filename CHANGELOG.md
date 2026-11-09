@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-09
+
+Moves tarka onto the cyrius 6.7 series. No source or API change.
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`** (through 6.7.0–6.7.8). `src/` is unchanged, and so
+  is every number tarka prints. The demo's output is byte-identical between 1.1.5 @ 6.6.20
+  and 1.2.0 @ 6.7.9, every gate number included, and `ALL GATES PASS`. So is the test
+  output, down to each finite-difference `maxrel` the grad-checks print. Suite **73/73**
+  unchanged (`tests/tarka.tcyr` 50, `tests/pref_ingest.tcyr` 23). `examples/quickstart.cyr`
+  prints the same output (REINFORCE 1.58 → 23.94). The bench and fuzz harnesses pass, and
+  fmt is clean. Lint reports the same 5 long-line warnings at the same lines. The binary
+  grows from 665,344 to 669,424 B; 1,900 B of that is more unreachable stdlib code
+  (502,441 → 504,341 B).
+
+  Upstream changes checked against tarka's source (`src/`, `tests/`, `examples/`), with
+  comments and strings stripped and the scanner checked against a planted-case control:
+  - **6.7.0–6.7.8** reserve `trait`, `const`, `true`, `false`, `do` and `dyn`. tarka
+    uses them only in comments and strings.
+  - **6.7.3** makes `!` a real operator. Before, a lone `!x` compiled as `x`. tarka has
+    no `!` outside `!=`, so no expression changed meaning.
+  - **6.7.9** makes unary `-` and `~` on a constant bind tighter. tarka has no unary `-`
+    or `~`; it writes negatives as `0 - n` and `~` appears only in comments.
+  - **6.7.8–6.7.9** change how typed `*T` pointers step and dereference, and **6.7.6**
+    rounds every write into an `f32`. tarka has neither: its buffers are untyped
+    addresses, and its floats are f64.
+  - **6.7.6** deprecates `cyrius tests` (removed in 6.7.12). tarka's CI and docs use
+    bare `cyrius test`, which still runs the `[build].test` stub plus `tests/*.tcyr`.
+    `cyrius test tests` runs the two suites without the stub.
+- **The substrate set moves to its 6.7.9-built releases:** `tyche` 1.1.1 → **1.2.0**,
+  `rosnet` 1.1.3 → **1.2.0**, `akshara` 1.0.4 → **1.1.0**. The chain stays consistent:
+  rosnet 1.2.0 pins tyche 1.2.0, and akshara 1.1.0 pins rosnet 1.2.0. None of the three
+  changed source, API or values; each moved only its toolchain and checked its output
+  byte-identical. Vendored `lib/tyche.cyr`, `lib/rosnet.cyr` and `lib/akshara.cyr`
+  byte-match the tagged `dist/` bundles, which differ from the 1.1.5 ones only in their
+  version lines.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the 6.7.9
+  snapshot: the same 113 files as 6.6.20, 67 of them with new content. Nothing was added
+  or removed. `lib/agnosys.cyr` is left as-is, as in 1.1.5.
+- **`cyrius.lock` regenerated from scratch.** One line each for akshara 1.1.0
+  (`09ed724`), rosnet 1.2.0 (`f065c58`) and tyche 1.2.0 (`2c393fe`), the same 117 file
+  hashes, trailer `cyrius 6.7.9`. `cyrius deps --verify` (117 verified, 0 failed) and
+  6.7.6's `cyrius deps --locked` are both clean.
+- The `[deps.tyche]` comment in `cyrius.cyml` now names the 1.2.0 pin.
+
 ## [1.1.5] - 2026-11-09
 
 A toolchain and dependency realign. No source change.
