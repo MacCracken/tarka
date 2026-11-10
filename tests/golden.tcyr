@@ -7,7 +7,9 @@
 #
 # A deliberate behavior change re-records only the cases it touches, and says so in the
 # CHANGELOG. 1.2.2 re-recorded two: "ipo metric" (ipo_mean_h skips ties) and "pref ingest"
-# (the vocab covers decoded field bytes; skip reasons are counted). Parameter digests and
+# (the vocab covers decoded field bytes; skip reasons are counted). 1.3.0 re-recorded "pref
+# ingest" (two-length pairs), then every case but "search" (the per-state aggregated backward
+# reorders the policy gradient's sums; search trains only the reward model). Parameter digests and
 # metric digests are kept apart so a metric-only fix (e.g. a corrected average) cannot hide
 # a training change.
 
@@ -218,20 +220,20 @@ fn check(name, got, want_x86, want_a64): i64 {
 
 fn main(): i64 {
     alloc_init();
-    check("reinforce", case_reinforce(), 0x84e2418d5c9b65cc, 0x4a01546fa1e2512a);
-    check("ppo", case_ppo(), 0xc5aa76ca6455df, 0xd788d363359e0a8);
-    check("grpo", case_grpo(), 0x9040e9b8aa4830b1, 0xdd5a3e4e6524f1b8);
-    check("parity", case_parity(), 0xd3520ebae291a3d9, 0x79e8d846cb0c81ff);
-    check("eff_run", case_effrun(), 0x7e7b0215017368cc, 0x9e0a515891479497);
-    check("reward", case_reward(), 0xe5a5b5d10599bd6c, 0xe20deeb3197c9cdc);
-    check("reasoning", case_reasoning(), 0xac48cd74484c7985, 0xe83b2b1c717d995f);
+    check("reinforce", case_reinforce(), 0x17c1a6f059ac2011, 0xdf24bf2b1fd8f24f);
+    check("ppo", case_ppo(), 0x94911847ccc64a05, 0x9473589bfb360ea5);
+    check("grpo", case_grpo(), 0xdbf91e425285622b, 0xaf9b9e8bfb96edc4);
+    check("parity", case_parity(), 0x3ec19d279b46e344, 0x90d3095342f3b334);
+    check("eff_run", case_effrun(), 0xd9fcb32675d8bfeb, 0x2bcb4b9d76754522);
+    check("reward", case_reward(), 0x954cc5d2aab2c6d2, 0xdff18f9afaa94406);
+    check("reasoning", case_reasoning(), 0xdd1d7657fab8b4ad, 0xedfae6e776c5e000);
     check("search", case_search(), 0x9b62159799ce5363, 0x9e96dfe034345e45);
-    check("dpo+kl", case_dpo(), 0x393412fb29481321, 0x4168f18fd39d81b0);
-    check("ipo train", case_ipo_train(), 0x778d9aee20a484d3, 0x3a2231837eabe0eb);
-    check("ipo metric", case_ipo_metric(), 0x7608befa05f72821, 0x7608bbfa05f72308);
-    check("kto", case_kto(), 0xd7ad0f770e71cf16, 0xce77111b85b9f916);
-    check("corpus reinforce", case_corpus(), 0xff605f597721a8ec, 0x17f90a93eaba1b6f);
-    check("pref ingest", case_pref(), 0x3a8105a1d1dc0215, 0x141bf3ffd7baca32);
+    check("dpo+kl", case_dpo(), 0xecbc3983071f5a08, 0x7a93987110499735);
+    check("ipo train", case_ipo_train(), 0x1321878753f971f3, 0xf6bc95596019afee);
+    check("ipo metric", case_ipo_metric(), 0x7608c2fa05f72eed, 0x7608adfa05f70b3e);
+    check("kto", case_kto(), 0x7842b1b30885e058, 0x5cde51b5d0e48db1);
+    check("corpus reinforce", case_corpus(), 0xe3e9df5346490389, 0x49dabcd2a1a09b2b);
+    check("pref ingest", case_pref(), 0xfea56cab63ff976b, 0xbce9385d4c0eadcc);
     return assert_summary();
 }
 

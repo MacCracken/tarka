@@ -1,0 +1,36 @@
+# tarka — abort probe: a memo region closing on a deferred gradient that was never applied.
+# CI builds it and requires exit 1 with "tarka: precondition violated" on stderr (a guard),
+# never a run past the bad call.
+
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "lib/akshara.cyr"
+include "src/rl.cyr"
+include "src/actorcritic.cyr"
+include "src/parity.cyr"
+include "src/reward.cyr"
+include "src/dpo.cyr"
+include "src/preference_ext.cyr"
+include "src/preference.cyr"
+include "src/reasoning.cyr"
+include "src/search.cyr"
+include "src/report.cyr"
+include "src/pref_ingest.cyr"
+
+fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+fn main(): i64 {
+    alloc_init();
+    var lr = f64_div(f64_from(5), f64_from(100));
+    pol_init(5, 4, 4, 0, 1); g_datalen = 0;
+    memo_begin(); rl_rollout(1); rl_backward(f64_from(1));
+    memo_end();
+    rp_puts("abort probe: the guard did not fire\n");
+    return 3;
+}
+
+var r = main();
+sys_exit(r);

@@ -33,7 +33,7 @@ the *methods* are the point):
   **verifier best-of-N**, and **PRM-guided beam search** that steers generation to a
   verifier objective greedy and best-of-N cannot reach.
 
-Every hand-derived backward is finite-difference grad-checked (**50**), each method is
+Every hand-derived backward is finite-difference grad-checked (**59**), each method is
 held to a falsifiable **acceptance gate** — see [`docs/benchmarks.md`](docs/benchmarks.md) —
 and every trainer's result is held to the bit by a golden gate on x86_64 and aarch64.
 Audits: [1.2.2](docs/audit/2026-11-09-audit.md) (the P(-1) sweep, incl. the `--pref`
@@ -76,11 +76,12 @@ cyrius deps                              # resolve stdlib + rosnet/tyche/akshara
 cyrius build src/main.cyr build/tarka    # compile to a static ELF
 ./build/tarka                            # run the demo — every acceptance gate
 ./build/tarka --pref prefs.jsonl         # train DPO/IPO/KTO from an ifran pref export
+./build/tarka --pref prefs.jsonl --early-stop --epochs 600   # options: --epochs --lr --dim --early-stop
 ./build/tarka --help                     # usage
 cyrius test                              # grad-checks, ingestion, units, the golden gate
 ```
 
-The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 1 s). `--pref`
+The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 0.7 s). `--pref`
 refuses files over 1 MB and prints why each refused row was refused.
 
 ## License

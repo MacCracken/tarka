@@ -224,6 +224,47 @@ fn test_buffers_resize(): i64 {
     return 0;
 }
 
+# ---- the aggregated backward (1.3.0) ---------------------------------------------------
+# the largest relative difference between two n-entry f64 blocks
+fn max_rel(a, b, n): i64 {
+    var mr = f64_from(0); var i = 0;
+    var floor = f64_div(f64_from(1), f64_from(1000000000));
+    while (i < n) {
+        var x = load64(a + i * 8); var y = load64(b + i * 8);
+        var d = f64_div(f64_abs(f64_sub(x, y)), f64_add(f64_abs(y), floor));
+        if (f64_gt(d, mr) == 1) { mr = d; }
+        i = i + 1;
+    }
+    return mr;
+}
+
+fn test_aggregated_backward(): i64 {
+    pol_init(9, 4, 12, 2, 31); g_datalen = 0;      # T 12 over V 9: some state repeats
+    rl_rollout(4);
+    var adv = f64_div(f64_from(3), f64_from(2));
+    pol_zero_grads(); rl_backward(adv);             # outside a region: per-token, immediate
+    var iW = t_alloc(g_D * g_V); var ib = t_alloc(g_V); var iE = t_alloc(g_V * g_D);
+    t_copy(iW, G_W, g_D * g_V); t_copy(ib, G_b, g_V); t_copy(iE, G_E, g_V * g_D);
+    memo_begin();
+    pol_zero_grads(); rl_backward(adv);             # inside: deferred per state
+    assert((PB_n >= 1) && (PB_n < g_T), "deferred: fewer pending rows than tokens (a state repeated)");
+    pol_bwd_flush();
+    memo_end();
+    var tight = f64_div(f64_from(1), f64_from(1000000000000));     # 1e-12
+    assert(f64_lt(max_rel(G_W, iW, g_D * g_V), tight) == 1, "aggregated dW == per-token dW (1e-12)");
+    assert(f64_lt(max_rel(G_b, ib, g_V), tight) == 1, "aggregated db == per-token db (1e-12)");
+    assert(f64_lt(max_rel(G_E, iE, g_V * g_D), tight) == 1, "aggregated dE == per-token dE (1e-12)");
+    memo_begin();
+    pol_zero_grads(); rl_backward(adv);
+    pol_zero_grads();                               # discards the pending rows
+    assert_eq(PB_n, 0, "pol_zero_grads drops the pending rows");
+    var z = 0; var i = 0;
+    while (i < g_D * g_V) { if (load64(G_W + i * 8) != 0) { z = 1; } i = i + 1; }
+    assert_eq(z, 0, "and leaves the gradient zero");
+    memo_end();
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_memo_hit_equals_compute();
@@ -238,6 +279,7 @@ fn main(): i64 {
     test_gae_normalize();
     test_grpo_equal_group();
     test_buffers_resize();
+    test_aggregated_backward();
     return assert_summary();
 }
 

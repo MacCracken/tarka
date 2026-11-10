@@ -157,16 +157,16 @@ fn fz_round(round): i64 {
     fz_check(round, pref_skip_count(PI_R_VOCAB()) == 0, "P1 a byte of a well-formed row has no token id");
     var k = 0;
     while (k < PI_np) {
-        var row = PI_pw + k * 40; var n = load64(row + 32);
-        fz_check(round, (n >= 1) && (n <= PI_NMAX()), "P3 pair span length");
-        var j = 0;
-        while (j < 4) {
-            fz_check(round, fz_ids_ok(load64(row + j * 8), n), "P1 pair token id out of range");
-            j = j + 1;
-        }
-        var same = _pi_same(load64(row), load64(row + 8), load64(row + 16), load64(row + 24), n);
+        var row = PI_pw + k * PI_PAIRB(); var nW = _pi_r(row, 2); var nL = _pi_r(row, 5);
+        fz_check(round, (nW >= 1) && (nW <= PI_NMAX()) && (nL >= 1) && (nL <= PI_NMAX()), "P3 pair span lengths");
+        fz_check(round, fz_ids_ok(_pi_r(row, 0), nW), "P1 winner state out of range");
+        fz_check(round, fz_ids_ok(_pi_r(row, 1), nW), "P1 winner action out of range");
+        fz_check(round, fz_ids_ok(_pi_r(row, 3), nL), "P1 loser state out of range");
+        fz_check(round, fz_ids_ok(_pi_r(row, 4), nL), "P1 loser action out of range");
+        var same = 0;
+        if (nW == nL) { same = _pi_same(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 3), _pi_r(row, 4), nW); }
         fz_check(round, same == 0, "P3 identical spans");
-        var d = dpo_delta(load64(row), load64(row + 8), load64(row + 16), load64(row + 24), n, DPO_BETA());
+        var d = dpo_delta2(_pi_r(row, 0), _pi_r(row, 1), nW, _pi_r(row, 3), _pi_r(row, 4), nL, DPO_BETA());
         fz_check(round, d == 0, "P4 delta bits != +0 at theta == ref");
         k = k + 1;
     }

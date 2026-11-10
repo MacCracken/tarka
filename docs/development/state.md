@@ -5,6 +5,16 @@
 
 ## Version
 
+**1.3.0** — 2026-11-09. **The 1.3.x line: training throughput and preference fidelity.** The
+policy's backward is aggregated per state inside tarka's training loops (one `linear_bwd` per
+touched state; [architecture note 002](../architecture/002-aggregated-backward.md)) — a labeled
+behavior change: 13 golden cases re-recorded, every gate and every printed demo number unchanged.
+Two-length DPO / IPO primitives (`dpo_*2`, `ipo_*2`, FD-checked with unequal sides); `--pref`
+scores each side at its own length. `--pref` options `--epochs` / `--lr` / `--dim` /
+`--early-stop` (defaults byte-identical). `guard()` aborts through the stdlib's `panic`. Demo
+986 → **706 ms**, REINFORCE / GRPO / DPO / KTO steps 2.4× / 1.9× / 2.0× / 1.7× over 1.2.2.
+Assertions 190 → **234**, abort probes 14, 28-mutant run all killed.
+
 **1.2.2** — 2026-11-09. **P(-1) sweep: audit, refactor, hardening, optimization, repairs**
 ([`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md)). Toolchain and deps unchanged
 (6.7.18; tyche 1.2.2 / rosnet 1.4.1 / akshara 1.1.2). **One HIGH fixed**: `--pref` built its vocab
@@ -212,19 +222,21 @@ parameter version (`memo_begin` / `memo_end`;
 
 ## Tests
 
-**190 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
-- `tests/tarka.tcyr` — **grad-check suite, 50** (M1: 4; M2: +15 — critic dW/db/dE
+**234 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
+- `tests/tarka.tcyr` — **grad-check suite, 59** (M1: 4; M2: +15 — critic dW/db/dE
   FD-exact; GAE recursion==explicit + return identity; PPO ρ=1==REINFORCE / unclipped FD
   3e-9 / binding-clip→0; GRPO group-norm anchors + ratio=1==REINFORCE; M3: +5 — RM
   dWr/dbr/dEr Bradley-Terry FD-exact + descent-direction falsifier; 1.1.0: +10 — DPO +
-  KL penalty; 1.1.1: +16 — IPO + KTO).
-- `tests/pref_ingest.tcyr` — **preference-file ingestion, 88** (1.1.2: 23; 1.2.2: +65 — escape
+  KL penalty; 1.1.1: +16 — IPO + KTO; 1.3.0: +9 — two-length DPO / IPO with unequal sides).
+- `tests/pref_ingest.tcyr` — **preference-file ingestion, 117** (1.1.2: 23; 1.2.2: +65 — escape
   bytes tokenize, raw-vocab refusal, the full escape set, strict labels, field types and line
-  structure, identical spans, the row cap and skip counts, KTO class sizes).
-- `tests/units.tcyr` — **38** (1.2.2): the memo's invalidation rules, parity / reasoning / search
-  helpers, beam(1,1) == best-of-1, GAE normalization, GRPO's equal group, buffer re-sizing.
+  structure, identical spans, the row cap and skip counts, KTO class sizes; 1.3.0: +29 — option
+  parsers, early stop, each side at its own length).
+- `tests/units.tcyr` — **44** (1.2.2: 38 — the memo's invalidation rules, parity / reasoning /
+  search helpers, beam(1,1) == best-of-1, GAE normalization, GRPO's equal group, buffer
+  re-sizing; 1.3.0: +6 — the aggregated gradient against the per-token one, discard).
 - `tests/golden.tcyr` — **14** (1.2.2): FNV-1a digests of every trainer's bits, per target.
-- `tests/abort/` — 13 guard probes (each must exit 1 with the guard's message; run by CI).
+- `tests/abort/` — 14 guard probes (each must exit 1 with the guard's message; run by CI).
 - `tests/tarka.fcyr` — seeded `--pref` fuzz harness, 5 properties × 4,000 rounds (~1.2 s).
 - `tests/tarka.bcyr` — 15 benchmarks; `scripts/bench-history.sh` → `bench-history.csv`.
 - Reference coverage (`cyrius coverage`): 132 / 208 functions; the demo, run by CI, exercises the rest.
@@ -254,7 +266,6 @@ is the eventual downstream.)
 
 ## Next
 
-1.3.x: a per-state aggregated backward, a two-length DPO / IPO primitive, `--pref` training
-knobs, and `guard()` on the stdlib's `panic`; then MCTS (1.4.x) and a GPU backend (1.5.x). The
-2.0.0 backlog holds the changes that would break the frozen 1.x API. See
-[`roadmap.md`](roadmap.md).
+1.4.x: MCTS on a task that warrants it; then a GPU backend (1.5.x). Unscheduled: an aggregated
+backward for the reward model, a `PMIN` floor for `f64_ln`. The 2.0.0 backlog holds the changes
+that would break the frozen 1.x API. See [`roadmap.md`](roadmap.md).

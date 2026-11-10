@@ -12,8 +12,8 @@ cyrius test                              # run [build].test + tests/*.tcyr
 
 - `src/main.cyr` — entry point + the demo (runs every milestone, prints the acceptance gates) and the CLI.
 - `src/test.cyr` — top-level test entry referenced by `cyrius.cyml [build].test` (a stub).
-- `tests/tarka.tcyr` — the finite-difference grad-check suite (50).
-- `tests/pref_ingest.tcyr` — `--pref` ingestion (88); `tests/units.tcyr` — the memo's rules and the task helpers (38).
+- `tests/tarka.tcyr` — the finite-difference grad-check suite (59).
+- `tests/pref_ingest.tcyr` — `--pref` ingestion (117); `tests/units.tcyr` — the memo's and the aggregated backward's rules, the task helpers (44).
 - `tests/golden.tcyr` — the bit-for-bit gate: 14 digests per target ([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
 - `tests/abort/*.cyr` — guard probes (each must exit 1); `tests/fixtures/` — the `--pref` fixture.
 - `tests/tarka.bcyr` / `tests/tarka.fcyr` — benchmarks / the seeded `--pref` fuzz harness.

@@ -4,6 +4,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-09
+
+The 1.3.x roadmap line: training throughput and preference fidelity. Toolchain and dependencies
+unchanged (cyrius 6.7.18; tyche 1.2.2, rosnet 1.4.1, akshara 1.1.2). No public signature changed;
+the new primitives sit beside the frozen ones. Two of the four items move results, each as a
+labeled behavior change ([ADR 0002](docs/adr/0002-optimizations-preserve-bits.md)) — the golden
+cases each one moved are named below.
+
+### Changed — behavior
+
+- **The policy's backward is aggregated per state** inside tarka's training loops
+  ([architecture note 002](docs/architecture/002-aggregated-backward.md)). Every token of one state
+  shares its embedding row, so the backward of a batch is one `linear_bwd` per touched state on the
+  sum of its seeds — at most 28 per REINFORCE step at the demo's shape, instead of 384. The rows
+  are applied when the gradient is next needed (`pol_scale_grads`, `pol_adam_step`), discarded by
+  `pol_zero_grads`, and `memo_end` aborts if a region closes with one unapplied. Outside tarka's
+  loops the backward stays per-token and immediate, so the grad-checks and any caller reading
+  `G_*` after a backward see exactly the old result. The gradient is the same sum taken in another
+  order (held to 1e-12 relative by `tests/units.tcyr`), so training results move by rounding:
+  13 of the 14 golden cases re-recorded (all but `search`, which trains only the reward model).
+  Every gate holds, and every number the demo and `--pref` print is unchanged at two decimals.
+- **`--pref` scores each side of a pair at its own length** through the new two-length
+  primitives (below); 1.2.x truncated both sides to the shorter one. A pair whose rejected text is
+  a prefix of the chosen one (or that shares a long preamble) was refused as identical spans and
+  now trains; only a pair whose two spans are identical in length and tokens is refused. A pair
+  row is 48 bytes (`stW acW nW stL acL nL`). Golden case: `pref ingest` (re-recorded before the
+  backward change, then again with it).
+
+### Added
+
+- **Two-length DPO / IPO primitives:** `dpo_delta2`, `dpo_pair_loss2`, `dpo_backward_pair2`,
+  `ipo_h2`, `ipo_pair_loss2`, `ipo_backward_pair2` take each side's own length
+  (`stW, acW, nW, stL, acL, nL`) — the full-sequence DPO objective. The single-n functions are now
+  these at `nW = nL = n`, with the same bits (all 14 golden cases held when they were rewired).
+  Finite-difference grad-checked with unequal sides (winner 3, loser 2; max relative error ≤ 6e-9)
+  plus the descent falsifiers. Grad-checks 50 → 59.
+- **`--pref` options:** `--epochs N` (1..100000, default 300), `--lr X` (a decimal in (0, 10],
+  default 0.05), `--dim D` (1..256, default 8), and `--early-stop`, which stops each optimizer once
+  its gate holds (checked every 10 epochs). A bad value prints usage and exits 2. The default run
+  is byte-identical to 1.2.2's (a decimal parses as integer ÷ 10ᵏ, so `--lr 0.05` gives the
+  default's exact bits). `tarka_pref_ingest_opts(path, epochs, lr, dim, early)`,
+  `pref_parse_uint`, `pref_parse_dec`, `PI_EPOCHS` / `PI_LR` / `PI_DIM`. On the 2026-11-09 review's
+  103 KB file, `--early-stop` runs in 1.2 s (default: 14.4 s), all gates green.
+
+### Changed
+
+- **`guard()` aborts through the stdlib's `panic`** (`lib/assert.cyr`, the residual SECURITY.md
+  was waiting on). The message is composed in a static buffer, so a guard works before
+  `alloc_init` and never touches the heap it protects. stderr now reads
+  `panic: tarka: precondition violated: <msg>`; the exit status is still 1.
+
+### Speed
+
+Same day, same host, median of three ([`docs/benchmarks.md`](docs/benchmarks.md) § 8), 1.2.2 →
+1.3.0: REINFORCE step 368 → 156 µs, PPO 171 → 130 µs, GRPO 263 → 138 µs, DPO 649 → 332 µs, KTO
+515 → 308 µs; the demo 986 → **706 ms** (3,495 ms at 1.2.1); the review's 103 KB `--pref` file
+41 → 14.4 s; the demo under qemu-aarch64 10 → 6 s.
+
+### Tests
+
+- Assertions 190 → **234**: grad-checks 50 → 59, `--pref` 88 → 117 (option parsers, early stop,
+  each side at its own length, the prefix pair now training), units 38 → 44 (the aggregated
+  gradient against the per-token one, discard), golden 14. Abort probes 13 → 14
+  (`tests/abort/deferred_lost.cyr`). The fuzz harness checks each side's span separately.
+- Mutation run 17 → 28 mutants (each flush point, the dedupe mark, the discard, the row clear,
+  the two-length seeds and margin, the row lengths, the decimal parser, the early-stop condition,
+  `guard()` not aborting), all killed.
+
+### Documentation
+
+- Architecture note 002 (the aggregated backward's invariant); `docs/api.md`, `docs/benchmarks.md`
+  (§ 7 options, § 8 a 1.3.0 column), `SECURITY.md`, the roadmap (the 1.3.x line is done; next is
+  1.4.x), `state.md`.
+
 ## [1.2.2] - 2026-11-09
 
 The P(-1) audit, refactor, hardening, optimization and repair sweep, recorded in

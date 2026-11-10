@@ -40,10 +40,53 @@ fn file_seek(fd, off): i64 { return 0 - 1; }
 
 # print the command-line usage
 fn usage(): i64 {
-    puts("usage: tarka                  run the demo (exit 0 = all gates pass)\n");
-    puts("       tarka --pref <file>    train DPO / IPO / KTO from an ifran `pref export` JSONL file\n");
-    puts("       tarka --help           this message\n");
+    puts("usage: tarka                            run the demo (exit 0 = all gates pass)\n");
+    puts("       tarka --pref <file> [options]    train DPO / IPO / KTO from an ifran `pref export` JSONL file\n");
+    puts("       tarka --help                     this message\n");
+    puts("--pref options:\n");
+    puts("  --epochs N     epochs per optimizer, 1..100000 (default 300)\n");
+    puts("  --lr X         learning rate, a decimal in (0, 10] (default 0.05)\n");
+    puts("  --dim D        policy embedding dim, 1..256 (default 8)\n");
+    puts("  --early-stop   stop each optimizer once its gate holds (checked every 10 epochs)\n");
     return 0;
+}
+
+# a --pref usage error: the message, the usage, exit status 2
+fn pref_usage_error(msg, arg): i64 {
+    puts("tarka: "); puts(msg); if (arg != 0) { puts(arg); } puts("\n");
+    usage();
+    return 2;
+}
+
+# `tarka --pref <file> [options]`: parse the options and run the ingestion driver
+fn pref_main(): i64 {
+    if (argc() < 3) { return pref_usage_error("--pref needs a <prefs.jsonl> (an ifran `pref export` file)", 0); }
+    if (load8(argv(2)) == 45) { return pref_usage_error("--pref needs the file first, not an option: ", argv(2)); }
+    var epochs = PI_EPOCHS(); var lr = PI_LR(); var dim = PI_DIM(); var early = 0;
+    var i = 3;
+    while (i < argc()) {
+        var a = argv(i);
+        var valued = 0;
+        if ((streq(a, "--epochs") == 1) || (streq(a, "--lr") == 1) || (streq(a, "--dim") == 1)) { valued = 1; }
+        if ((valued == 1) && (i + 1 >= argc())) { return pref_usage_error("missing value for ", a); }
+        if (streq(a, "--early-stop") == 1) { early = 1; i = i + 1; }
+        elif (streq(a, "--epochs") == 1) {
+            epochs = pref_parse_uint(argv(i + 1));
+            if ((epochs < 1) || (epochs > 100000)) {
+                return pref_usage_error("--epochs must be 1..100000, got ", argv(i + 1));
+            }
+            i = i + 2;
+        } elif (streq(a, "--lr") == 1) {
+            lr = pref_parse_dec(argv(i + 1));
+            if (lr == 0) { return pref_usage_error("--lr must be a decimal in (0, 10], got ", argv(i + 1)); }
+            i = i + 2;
+        } elif (streq(a, "--dim") == 1) {
+            dim = pref_parse_uint(argv(i + 1));
+            if ((dim < 1) || (dim > 256)) { return pref_usage_error("--dim must be 1..256, got ", argv(i + 1)); }
+            i = i + 2;
+        } else { return pref_usage_error("unknown --pref option: ", a); }
+    }
+    return tarka_pref_ingest_opts(argv(2), epochs, lr, dim, early);
 }
 
 # run the demo, or the --pref driver; returns the exit code
@@ -54,14 +97,7 @@ fn main(): i64 {
     args_init();
     if (argc() >= 2) {
         if ((streq(argv(1), "--help") == 1) || (streq(argv(1), "-h") == 1)) { usage(); return 0; }
-        if (streq(argv(1), "--pref") == 1) {
-            if (argc() != 3) {
-                puts("tarka: --pref takes exactly one <prefs.jsonl> (an ifran `pref export` file)\n");
-                usage();
-                return 2;
-            }
-            return tarka_pref_ingest(argv(2));
-        }
+        if (streq(argv(1), "--pref") == 1) { return pref_main(); }
         puts("tarka: unknown argument: "); puts(argv(1)); puts("\n");
         usage();
         return 2;

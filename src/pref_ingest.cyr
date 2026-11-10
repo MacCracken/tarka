@@ -28,9 +28,10 @@
 # tokens c₀..c_{b-1}, the scored span is the completion given its left context:
 #   states  = [p_{a-1}, c₀, …, c_{b-2}]
 #   actions = [c₀,      c₁, …, c_{b-1}]      (n = b pairs; prompt-less rows use
-# the completion's own bigrams, n = b−1). DPO/IPO pairs truncate both sides to
-# the shared min (the primitive is single-n); everything caps at PI_NMAX. A pair whose
-# two truncated spans are identical carries no preference (Δ ≡ 0) and is refused.
+# the completion's own bigrams, n = b−1). Each side of a DPO/IPO pair is scored at its
+# own length (the two-length primitives, 1.3.0; 1.2.x truncated both to the shorter);
+# every span caps at PI_NMAX. A pair whose two spans are identical carries no preference
+# (Δ ≡ 0) and is refused.
 #
 # Gates (printed + exit code): with θ snapshotted as its own reference, every
 # pair starts at Δ=0 (loss −lnσ(0)=0.693, ranking accuracy 0) — after training,
@@ -46,7 +47,8 @@ fn PI_MAXEX(): i64 { return 256; }
 # 1 MB file cap (a larger file is refused)
 fn PI_FMAX(): i64 { return 1048576; }
 
-# pair rows: 40 B each — stW acW stL acL n
+# pair rows: PI_PAIRB() = 48 B each — stW acW nW stL acL nL
+fn PI_PAIRB(): i64 { return 48; }
 var PI_pw = 0; var PI_np = 0;
 # unary rows: 32 B each — st ac n label
 var PI_un = 0; var PI_nu = 0;
@@ -400,14 +402,11 @@ fn _pi_line(ld, ll): i64 {
         var nW = _pi_seq(PR_p, PR_plen, PR_c, PR_clen, stW, acW);
         var nL = _pi_seq(PR_p, PR_plen, PR_r, PR_rlen, stL, acL);
         if ((nW < 0) || (nL < 0)) { return PI_R_VOCAB(); }
-        var n = nW;
-        if (nL < n) { n = nL; }                       # single-n primitive: shared min
-        if (n < 1) { return PI_R_EMPTY(); }
-        if (_pi_same(stW, acW, stL, acL, n) == 1) { return PI_R_SAME(); }
-        var row = PI_pw + PI_np * 40;
-        store64(row, stW); store64(row + 8, acW);
-        store64(row + 16, stL); store64(row + 24, acL);
-        store64(row + 32, n);
+        if ((nW < 1) || (nL < 1)) { return PI_R_EMPTY(); }
+        if ((nW == nL) && (_pi_same(stW, acW, stL, acL, nW) == 1)) { return PI_R_SAME(); }
+        var row = PI_pw + PI_np * PI_PAIRB();
+        store64(row, stW); store64(row + 8, acW); store64(row + 16, nW);
+        store64(row + 24, stL); store64(row + 32, acL); store64(row + 40, nL);
         PI_np = PI_np + 1;
         return 0;
     }
@@ -430,7 +429,7 @@ fn pref_ingest_file(buf, flen): i64 {
     guard(g_char2id != 0, "pref_ingest_file: load a byte vocab (corpus_set) first");
     guard((g_V >= 1) && (g_V >= g_corpus_vlen),
       "pref_ingest_file: initialize the policy (pol_init) over the vocab first");
-    PI_pw = alloc(PI_MAXEX() * 40);
+    PI_pw = alloc(PI_MAXEX() * PI_PAIRB());
     PI_un = alloc(PI_MAXEX() * 32);
     PI_np = 0; PI_nu = 0;
     _pi_skip_reset();
@@ -438,7 +437,7 @@ fn pref_ingest_file(buf, flen): i64 {
     return PI_np + PI_nu;
 }
 
-# pair-row field accessor (rows are 40 B: stW acW stL acL n)
+# pair-row field accessor (rows are PI_PAIRB() = 48 B: 0 stW, 1 acW, 2 nW, 3 stL, 4 acL, 5 nL)
 fn _pi_r(row, k): i64 { return load64(row + k * 8); }
 
 # ---- gates ---------------------------------------------------------------------
@@ -449,10 +448,12 @@ fn _pi_dpo_eval(acc_out): i64 {
     var right = 0;
     var k = 0;
     while (k < PI_np) {
-        var row = PI_pw + k * 40;
-        var pl = dpo_pair_loss(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4), DPO_BETA());
+        var row = PI_pw + k * PI_PAIRB();
+        var pl = dpo_pair_loss2(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4),
+          _pi_r(row, 5), DPO_BETA());
         lsum = f64_add(lsum, pl);
-        var d = dpo_delta(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4), DPO_BETA());
+        var d = dpo_delta2(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4),
+          _pi_r(row, 5), DPO_BETA());
         if (f64_gt(d, f64_from(0)) == 1) { right = right + 1; }
         k = k + 1;
     }
@@ -468,10 +469,11 @@ fn _pi_ipo_eval(acc_out): i64 {
     var right = 0;
     var k = 0;
     while (k < PI_np) {
-        var row = PI_pw + k * 40;
-        var pl = ipo_pair_loss(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4), IPO_BETA());
+        var row = PI_pw + k * PI_PAIRB();
+        var pl = ipo_pair_loss2(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4),
+          _pi_r(row, 5), IPO_BETA());
         lsum = f64_add(lsum, pl);
-        var h = ipo_h(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4));
+        var h = ipo_h2(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4), _pi_r(row, 5));
         if (f64_gt(h, f64_from(0)) == 1) { right = right + 1; }
         k = k + 1;
     }
@@ -527,12 +529,13 @@ fn _pi_train_pairs(epochs, lr, use_ipo): i64 {
         pol_zero_grads();
         var k = 0;
         while (k < PI_np) {
-            var row = PI_pw + k * 40;
-            var n = _pi_r(row, 4);
+            var row = PI_pw + k * PI_PAIRB();
             if (use_ipo == 1) {
-                ipo_backward_pair(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), n, IPO_BETA());
+                ipo_backward_pair2(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4),
+                  _pi_r(row, 5), IPO_BETA());
             } else {
-                dpo_backward_pair(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), n, DPO_BETA());
+                dpo_backward_pair2(_pi_r(row, 0), _pi_r(row, 1), _pi_r(row, 2), _pi_r(row, 3), _pi_r(row, 4),
+                  _pi_r(row, 5), DPO_BETA());
             }
             k = k + 1;
         }
@@ -568,8 +571,111 @@ fn _pi_train_kto(epochs, lr): i64 {
     return 0;
 }
 
+# ---- command-line options ---------------------------------------------------------
+# the default epochs per optimizer
+fn PI_EPOCHS(): i64 { return 300; }
+# the default policy embedding dim
+fn PI_DIM(): i64 { return 8; }
+# the default learning rate, 0.05 (5 / 100, the bits pref_parse_dec gives "0.05")
+fn PI_LR(): i64 { return f64_div(f64_from(5), f64_from(100)); }
+
+# a decimal integer of 1..9 digits, or -1
+fn pref_parse_uint(s): i64 {
+    var n = 0; var v = 0;
+    while (load8(s + n) != 0) {
+        var c = load8(s + n);
+        if ((c < 48) || (c > 57)) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        n = n + 1;
+        if (n > 9) { return 0 - 1; }
+    }
+    if (n == 0) { return 0 - 1; }
+    return v;
+}
+
+# a positive decimal "I" or "I.F" (1..9 digits each side, at most 10) as f64 bits, or 0
+# when the text is not one. The value is (I·10^k + F) / 10^k, so "0.05" gives exactly
+# the bits of f64_div(f64_from(5), f64_from(100)).
+fn pref_parse_dec(s): i64 {
+    var i = 0; var mant = 0; var den = 1; var ni = 0; var nf = 0; var dot = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c == 46) {
+            if (dot == 1) { return 0; }
+            dot = 1;
+        } elif ((c >= 48) && (c <= 57)) {
+            mant = mant * 10 + (c - 48);
+            if (dot == 1) { nf = nf + 1; den = den * 10; } else { ni = ni + 1; }
+            if ((ni > 9) || (nf > 9)) { return 0; }
+        } else { return 0; }
+        i = i + 1;
+    }
+    if (ni == 0) { return 0; }
+    if ((dot == 1) && (nf == 0)) { return 0; }
+    if (mant == 0) { return 0; }
+    var v = f64_div(f64_from(mant), f64_from(den));
+    if (f64_gt(v, f64_from(10)) == 1) { return 0; }
+    return v;
+}
+
+# Train the pairs for up to `epochs` epochs. With early != 0, train in rounds of 10 and
+# stop once every pair is ranked correctly with the mean loss below l0. Returns the
+# epochs run. early == 0 is one _pi_train_pairs call, as before 1.3.0.
+fn _pi_fit_pairs(epochs, lr, use_ipo, early, l0): i64 {
+    if (early == 0) { _pi_train_pairs(epochs, lr, use_ipo); return epochs; }
+    var acc = alloc(8);
+    var e = 0;
+    while (e < epochs) {
+        var k = epochs - e;
+        if (k > 10) { k = 10; }
+        _pi_train_pairs(k, lr, use_ipo);
+        e = e + k;
+        var l = 0;
+        if (use_ipo == 1) { l = _pi_ipo_eval(acc); } else { l = _pi_dpo_eval(acc); }
+        if ((load64(acc) == PI_np) && (f64_lt(l, l0) == 1)) { return e; }
+    }
+    return e;
+}
+
+# Train the thumbs for up to `epochs` epochs; with early != 0, in rounds of 10, stopping
+# once each present class has moved its way from (d0, u0). Returns the epochs run.
+fn _pi_fit_kto(epochs, lr, early, d0, u0): i64 {
+    if (early == 0) { _pi_train_kto(epochs, lr); return epochs; }
+    var mD = alloc(8); var mU = alloc(8);
+    var e = 0;
+    while (e < epochs) {
+        var k = epochs - e;
+        if (k > 10) { k = 10; }
+        _pi_train_kto(k, lr);
+        e = e + k;
+        _pi_kto_sep(mD, mU);
+        var ok = 1;
+        if ((PI_nD > 0) && (f64_gt(load64(mD), d0) == 0)) { ok = 0; }
+        if ((PI_nU > 0) && (f64_lt(load64(mU), u0) == 0)) { ok = 0; }
+        if (ok == 1) { return e; }
+    }
+    return e;
+}
+
+# print "  (early stop after N of M epochs)" when an early-stopped fit ran short
+fn _pi_fit_note(early, ran, epochs): i64 {
+    if ((early != 0) && (ran < epochs)) {
+        rp_puts("  (early stop after "); fmt_int(ran); rp_puts(" of "); fmt_int(epochs); rp_puts(" epochs)\n");
+    }
+    return 0;
+}
+
 # ---- the driver: tarka --pref <prefs.jsonl> ------------------------------------
+# the driver behind `tarka --pref <file>`, at the default settings
 fn tarka_pref_ingest(path): i64 {
+    return tarka_pref_ingest_opts(path, PI_EPOCHS(), PI_LR(), PI_DIM(), 0);
+}
+
+# The driver with its settings: `epochs` per optimizer, learning rate `lr` (f64), policy
+# embedding dim `dim`, and early stop (early != 0). Returns the exit code.
+fn tarka_pref_ingest_opts(path, epochs, lr, dim, early): i64 {
+    guard((epochs >= 1) && (dim >= 1) && (f64_gt(lr, f64_from(0)) == 1),
+      "tarka_pref_ingest_opts: epochs and dim must be >= 1 and lr > 0");
     var buf = alloc(PI_FMAX() + 2);
     var flen = file_read_all(path, buf, PI_FMAX() + 1);
     if (flen <= 0) {
@@ -593,7 +699,7 @@ fn tarka_pref_ingest(path): i64 {
         return 1;
     }
     var V = corpus_set(text, tlen);
-    pol_init(V, 8, 16, 0, 4242);
+    pol_init(V, dim, 16, 0, 4242);
     dpo_init();
     dpo_snapshot();                                   # theta == ref at start
     var total = pref_ingest_file(buf, flen);
@@ -608,7 +714,6 @@ fn tarka_pref_ingest(path): i64 {
 
     var fails = 0;
     var accp = alloc(8);
-    var lr = f64_div(f64_from(5), f64_from(100));
 
     if (PI_np > 0) {
         # ---- DPO over the ingested pairs ----
@@ -617,16 +722,17 @@ fn tarka_pref_ingest(path): i64 {
         rp_puts("\n--- DPO on "); fmt_int(PI_np); rp_puts(" ingested pairs ---\n");
         rp_puts("  before: mean loss "); print_f2(l0);
         rp_puts("  ranked-correct "); fmt_int(a0); rp_puts("/"); fmt_int(PI_np); rp_puts("\n");
-        _pi_train_pairs(300, lr, 0);
+        var ran = _pi_fit_pairs(epochs, lr, 0, early, l0);
         var l1 = _pi_dpo_eval(accp);
         var a1 = load64(accp);
         rp_puts("  after:  mean loss "); print_f2(l1);
         rp_puts("  ranked-correct "); fmt_int(a1); rp_puts("/"); fmt_int(PI_np); rp_puts("\n");
+        _pi_fit_note(early, ran, epochs);
         if (a1 < PI_np) { fails = fails + 1; rp_puts("  GATE FAIL: not all pairs ranked correctly\n"); }
         if (f64_lt(l1, l0) == 0) { fails = fails + 1; rp_puts("  GATE FAIL: DPO loss did not decrease\n"); }
 
         # ---- IPO over the same pairs (fresh policy) ----
-        pol_init(V, 8, 16, 0, 777);
+        pol_init(V, dim, 16, 0, 777);
         dpo_init();
         dpo_snapshot();
         var i0 = _pi_ipo_eval(accp);
@@ -634,18 +740,19 @@ fn tarka_pref_ingest(path): i64 {
         rp_puts("--- IPO on the same pairs (fresh policy) ---\n");
         rp_puts("  before: mean loss "); print_f2(i0);
         rp_puts("  ranked-correct "); fmt_int(b0); rp_puts("/"); fmt_int(PI_np); rp_puts("\n");
-        _pi_train_pairs(300, lr, 1);
+        var ran_i = _pi_fit_pairs(epochs, lr, 1, early, i0);
         var i1 = _pi_ipo_eval(accp);
         var b1 = load64(accp);
         rp_puts("  after:  mean loss "); print_f2(i1);
         rp_puts("  ranked-correct "); fmt_int(b1); rp_puts("/"); fmt_int(PI_np); rp_puts("\n");
+        _pi_fit_note(early, ran_i, epochs);
         if (b1 < PI_np) { fails = fails + 1; rp_puts("  GATE FAIL: not all pairs ranked correctly (IPO)\n"); }
         if (f64_lt(i1, i0) == 0) { fails = fails + 1; rp_puts("  GATE FAIL: IPO loss did not decrease\n"); }
     }
 
     if (PI_nu > 0) {
         # ---- KTO over the unary thumbs (fresh policy) ----
-        pol_init(V, 8, 16, 0, 991);
+        pol_init(V, dim, 16, 0, 991);
         dpo_init();
         dpo_snapshot();
         var mD = alloc(8); var mU = alloc(8);
@@ -655,11 +762,12 @@ fn tarka_pref_ingest(path): i64 {
         rp_puts(" desirable, "); fmt_int(PI_nU); rp_puts(" undesirable; fresh policy) ---\n");
         rp_puts("  before: mean log-ratio desirable "); print_f2(d0);
         rp_puts("  undesirable "); print_f2(u0); rp_puts("\n");
-        _pi_train_kto(300, lr);
+        var ran_k = _pi_fit_kto(epochs, lr, early, d0, u0);
         _pi_kto_sep(mD, mU);
         var d1 = load64(mD); var u1 = load64(mU);
         rp_puts("  after:  mean log-ratio desirable "); print_f2(d1);
         rp_puts("  undesirable "); print_f2(u1); rp_puts("\n");
+        _pi_fit_note(early, ran_k, epochs);
         if ((PI_nD > 0) && (f64_gt(d1, d0) == 0)) {
             fails = fails + 1; rp_puts("  GATE FAIL: KTO did not raise the desirable mean log-ratio\n");
         }

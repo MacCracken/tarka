@@ -7,3 +7,4 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 ## Items
 
 - [001 — The distribution memo: when a cached π(·|x) is valid](001-distribution-memo.md)
+- [002 — The aggregated backward: when `G_*` is complete](002-aggregated-backward.md)

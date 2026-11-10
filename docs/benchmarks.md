@@ -16,8 +16,9 @@ verified against central differences before any of these numbers are trusted —
 `tests/golden.tcyr`, which holds every trainer's result to the bit
 ([ADR 0002](adr/0002-optimizations-preserve-bits.md)).
 
-Measured on the dev host (cyrius 6.7.18, x86_64): full demo wall-clock **986 ms** (1.2.2;
-3,495 ms at 1.2.1 — § 8). The numbers below are the same on aarch64 (qemu).
+Measured on the dev host (cyrius 6.7.18, x86_64): full demo wall-clock **706 ms** (1.3.0;
+986 ms at 1.2.2, 3,495 ms at 1.2.1 — § 8). The numbers below are the same on aarch64 (qemu), and
+1.3.0's reordered gradient sums (§ 8) left every one of them unchanged at the printed precision.
 
 ## 1. REINFORCE — the policy learns (count task)
 
@@ -122,34 +123,41 @@ non-JSON line and an unknown kind (`vocab=33  pairs=3  unary=4  skipped=3 (malfo
 | KTO | ρ desirable 0.00 / undesirable 0.00 | **42.12 / −132.60** |
 
 **Gates:** every pair ranked correctly with the loss down; each present KTO class moved in its
-direction ✅. Wall-clock 64 ms.
+direction ✅. Wall-clock 64 ms. Since 1.3.0 each side of a pair is scored at its own length
+(1.2.x truncated both to the shorter); the fixture's printed numbers are unchanged.
+
+Options (1.3.0): `--epochs N` (default 300), `--lr X` (0.05), `--dim D` (8), `--early-stop`
+(stop an optimizer once its gate holds, checked every 10 epochs). On the 2026-11-09 review's
+103 KB file (256 pairs, 256 thumbs, V 92) the default run takes 14.4 s; with `--early-stop`
+each of the three optimizers stops after 10 epochs and the run takes 1.2 s, all gates green.
 
 ## 8. Throughput
 
 `scripts/bench-history.sh` runs `CYRIUS_DCE=1 cyrius bench tests/tarka.bcyr` three times and
-appends the medians to `bench-history.csv`. The two rows below were recorded in one session on
-the dev host (AMD Ryzen 7 5800H, x86_64), before and after the 1.2.2 sweep:
+appends the medians to `bench-history.csv`. The rows below were recorded on the dev host (AMD
+Ryzen 7 5800H, x86_64) on 2026-11-09 — 1.2.1 and 1.2.2 in one session, 1.3.0 the same day:
 
-| benchmark | 1.2.1 | 1.2.2 | |
-|-----------|------:|------:|---|
-| forward V28 D8 | 904 ns | 894 ns | (kernel, uncached) |
-| forward V256 D64 | 11.57 µs | 12.83 µs | (kernel, uncached; run-to-run spread) |
-| rollout T24 V28 D8 | 23.06 µs | 24.17 µs | (outside a memo region) |
-| rl_backward T24 V28 D8 | 43.90 µs | 41.04 µs | |
-| rl_backward T24 V256 D64 | 856.3 µs | 794.1 µs | |
-| adam step V28 D8 | 8.77 µs | 9.02 µs | |
-| adam step V256 D64 | 595.8 µs | 603.6 µs | |
-| **REINFORCE step** (batch 16, T 24, V28 D8) | 1,072 µs | **368 µs** | 2.9× |
-| **PPO step** (4 epochs) | 285.4 µs | **171.3 µs** | 1.7× |
-| **GRPO step** (group 8) | 703.0 µs | **263.3 µs** | 2.7× |
-| PRM step (batch 16, V12 D8) | 26.7 µs | 24.2 µs | |
-| **DPO step** (batch 16) | 2,692 µs | **649 µs** | 4.2× |
-| **KTO step** (batch 16) | 2,486 µs | **515 µs** | 4.8× |
-| beam search B8 K8 (per prompt) | 313.9 µs | 307.5 µs | (uncached by design) |
-| pref_ingest_file, ~1 MB JSONL | 22.06 ms | 25.83 ms | 17% slower: the validating second pass |
+| benchmark | 1.2.1 | 1.2.2 | 1.3.0 | |
+|-----------|------:|------:|------:|---|
+| forward V28 D8 | 904 ns | 894 ns | 935 ns | (kernel, uncached) |
+| forward V256 D64 | 11.57 µs | 12.83 µs | 13.05 µs | (kernel, uncached; run-to-run spread) |
+| rollout T24 V28 D8 | 23.06 µs | 24.17 µs | 24.70 µs | (outside a memo region) |
+| rl_backward T24 V28 D8 | 43.90 µs | 41.04 µs | 41.56 µs | (outside a region: per-token) |
+| rl_backward T24 V256 D64 | 856.3 µs | 794.1 µs | 850.6 µs | |
+| adam step V28 D8 | 8.77 µs | 9.02 µs | 9.32 µs | |
+| adam step V256 D64 | 595.8 µs | 603.6 µs | 635.0 µs | |
+| **REINFORCE step** (batch 16, T 24, V28 D8) | 1,072 µs | 368 µs | **156 µs** | 6.9× since 1.2.1 |
+| **PPO step** (4 epochs) | 285.4 µs | 171.3 µs | **130.2 µs** | 2.2× |
+| **GRPO step** (group 8) | 703.0 µs | 263.3 µs | **137.8 µs** | 5.1× |
+| PRM step (batch 16, V12 D8) | 26.7 µs | 24.2 µs | 23.9 µs | (the RM backward is per-token) |
+| **DPO step** (batch 16) | 2,692 µs | 649 µs | **332 µs** | 8.1× |
+| **KTO step** (batch 16) | 2,486 µs | 515 µs | **308 µs** | 8.1× |
+| beam search B8 K8 (per prompt) | 313.9 µs | 307.5 µs | 347.4 µs | (uncached, no policy backward; spread) |
+| pref_ingest_file, ~1 MB JSONL | 22.06 ms | 25.83 ms | 27.03 ms | the validating second pass (1.2.2) |
 
-End to end: the demo 3,495 → **986 ms** (median of three, 3.5×); the review's 103 KB, V 92
-preference file 219 → 41 s; the demo under qemu-aarch64 36 → 10 s.
+1.2.2's gain is the distribution memo, 1.3.0's the aggregated backward. End to end: the demo
+3,495 → 986 → **706 ms** (median of three; 4.9× since 1.2.1); the review's 103 KB, V 92
+preference file 219 → 41 → **14.4 s**; the demo under qemu-aarch64 36 → 10 → **6 s**.
 
 ## Performance notes
 
@@ -159,10 +167,12 @@ preference file 219 → 41 s; the demo under qemu-aarch64 36 → 10 s.
   frozen reference (every DPO / IPO / KTO / KL forward) and the reward model. Bits unchanged —
   `tests/golden.tcyr` checks it on both targets. The kernel rows in § 8 do not move because
   they run outside a memo region.
-- **What a training step costs now**: `linear_bwd` (≈ 0.9 µs per token at V 28, D 8 — a
-  REINFORCE step runs 384). Batching the backward per state would cut it, but reorders the
-  gradient's sums — a behavior change under ADR 0002, not an optimization (see the 2026-11-09
-  audit's observations).
+- **The aggregated backward** (1.3.0, [architecture note 002](architecture/002-aggregated-backward.md)):
+  inside a training step every token of one state shares its embedding row, so the policy's
+  backward runs once per touched state on the sum of its seeds (≤ 28 `linear_bwd` per REINFORCE
+  step instead of 384). It reorders the gradient's sums, so it shipped as a labeled behavior
+  change (ADR 0002): 13 golden cases re-recorded, every gate and every printed demo number
+  unchanged. The reward model's backward is still per token (a 1.x item).
 - **Allocation discipline**: every working buffer (policy/critic/reward parameters + gradients
   + Adam moments, the memo tables, rollout/group/beam scratch) is allocated in an `*_init`
   function or once on first use (re-sized when the rollout length changes) and reused —

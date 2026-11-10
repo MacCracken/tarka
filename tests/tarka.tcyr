@@ -126,6 +126,28 @@ fn check_dpoblock(P, G, np, stW, acW, stL, acL, n, beta): i64 {
     }
     return mr;
 }
+# central FD grads of the two-length DPO / IPO losses (1.3.0) wrt POLICY parameter P[idx]
+fn fd_pair2(P, idx, stW, acW, nW, stL, acL, nL, beta, ipo): i64 {
+    var save = load64(P + idx * 8);
+    store64(P + idx * 8, f64_add(save, EPS()));
+    var lp = dpo_pair_loss2(stW, acW, nW, stL, acL, nL, beta);
+    if (ipo == 1) { lp = ipo_pair_loss2(stW, acW, nW, stL, acL, nL, beta); }
+    store64(P + idx * 8, f64_sub(save, EPS()));
+    var lm = dpo_pair_loss2(stW, acW, nW, stL, acL, nL, beta);
+    if (ipo == 1) { lm = ipo_pair_loss2(stW, acW, nW, stL, acL, nL, beta); }
+    store64(P + idx * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
+}
+fn check_pair2block(P, G, np, stW, acW, nW, stL, acL, nL, beta, ipo): i64 {
+    var mr = f64_from(0); var i = 0;
+    while (i < np) {
+        var re = relerr(fd_pair2(P, i, stW, acW, nW, stL, acL, nL, beta, ipo), load64(G + i * 8));
+        if (f64_gt(re, mr) == 1) { mr = re; }
+        i = i + 1;
+    }
+    return mr;
+}
+
 # central FD grad of the KL penalty β·KL(p‖q) wrt POLICY parameter P[idx] (reference frozen)
 fn fd_kl(P, idx, x, beta): i64 {
     var save = load64(P + idx * 8);
@@ -482,6 +504,46 @@ fn main() {
     assert((f64_is_finite(ih0) == 1) && (f64_is_finite(ih1) == 1), "IPO h finite");
     assert(f64_lt(f64_abs(f64_sub(ih1, im)), f64_abs(f64_sub(ih0, im))) == 1,
       "IPO step moves h toward target margin (|h−m| decreases)");
+
+    test_group("DPO / IPO two-length (1.3.0) — FD grad-check with unequal sides (winner 3, loser 2)");
+    pol_init(8, 4, 3, 3, 99); dpo_init();
+    dpo_snapshot();
+    rng_seed(456);                                 # move θ off the reference
+    t_randn(P_E, 8 * 4, f64_div(f64_from(1), f64_from(10)));
+    t_randn(P_W, 4 * 8, f64_div(f64_from(1), f64_from(10)));
+    var tstW = t_alloc(3); var tacW = t_alloc(3); var tstL = t_alloc(2); var tacL = t_alloc(2);
+    store64(tstW, 1); store64(tstW + 8, 3); store64(tstW + 16, 6);
+    store64(tacW, 3); store64(tacW + 8, 6); store64(tacW + 16, 2);
+    store64(tstL, 1); store64(tstL + 8, 4); store64(tacL, 4); store64(tacL + 8, 7);
+    pol_zero_grads(); dpo_backward_pair2(tstW, tacW, 3, tstL, tacL, 2, DPO_BETA());
+    var m2W = check_pair2block(P_W, G_W, g_D * g_V, tstW, tacW, 3, tstL, tacL, 2, DPO_BETA(), 0);
+    var m2b = check_pair2block(P_b, G_b, g_V, tstW, tacW, 3, tstL, tacL, 2, DPO_BETA(), 0);
+    var m2E = check_pair2block(P_E, G_E, g_V * g_D, tstW, tacW, 3, tstL, tacL, 2, DPO_BETA(), 0);
+    show("  DPO2 dW maxrel = ", m2W); show("  DPO2 dE maxrel = ", m2E); show("  DPO2 db maxrel = ", m2b);
+    assert(f64_lt(m2W, TOL()), "two-length DPO dW FD grad-check");
+    assert(f64_lt(m2E, TOL()), "two-length DPO dE FD grad-check");
+    assert(f64_lt(m2b, TOL()), "two-length DPO db FD grad-check");
+    var t0 = dpo_delta2(tstW, tacW, 3, tstL, tacL, 2, DPO_BETA());
+    pol_zero_grads(); dpo_backward_pair2(tstW, tacW, 3, tstL, tacL, 2, DPO_BETA());
+    pol_adam_step(f64_div(f64_from(1), f64_from(10)));
+    assert(f64_gt(dpo_delta2(tstW, tacW, 3, tstL, tacL, 2, DPO_BETA()), t0) == 1, "two-length DPO step increases Δ");
+    pol_zero_grads(); ipo_backward_pair2(tstW, tacW, 3, tstL, tacL, 2, IPO_BETA());
+    var i2W = check_pair2block(P_W, G_W, g_D * g_V, tstW, tacW, 3, tstL, tacL, 2, IPO_BETA(), 1);
+    var i2b = check_pair2block(P_b, G_b, g_V, tstW, tacW, 3, tstL, tacL, 2, IPO_BETA(), 1);
+    var i2E = check_pair2block(P_E, G_E, g_V * g_D, tstW, tacW, 3, tstL, tacL, 2, IPO_BETA(), 1);
+    show("  IPO2 dW maxrel = ", i2W); show("  IPO2 dE maxrel = ", i2E); show("  IPO2 db maxrel = ", i2b);
+    assert(f64_lt(i2W, TOL()), "two-length IPO dW FD grad-check");
+    assert(f64_lt(i2E, TOL()), "two-length IPO dE FD grad-check");
+    assert(f64_lt(i2b, TOL()), "two-length IPO db FD grad-check");
+    var h20 = ipo_h2(tstW, tacW, 3, tstL, tacL, 2); var hm = ipo_target(IPO_BETA());
+    pol_zero_grads(); ipo_backward_pair2(tstW, tacW, 3, tstL, tacL, 2, IPO_BETA());
+    pol_adam_step(f64_div(f64_from(1), f64_from(100)));
+    var h21 = ipo_h2(tstW, tacW, 3, tstL, tacL, 2);
+    assert(f64_lt(f64_abs(f64_sub(h21, hm)), f64_abs(f64_sub(h20, hm))) == 1,
+      "two-length IPO step moves h toward its target");
+    var w1 = dpo_delta(tstW, tacW, tstL, tacL, 2, DPO_BETA());
+    var w2 = dpo_delta2(tstW, tacW, 2, tstL, tacL, 2, DPO_BETA());
+    assert_eq(w1, w2, "dpo_delta == dpo_delta2 at nW = nL (same bits)");
 
     test_group("KTO — unpaired prospect-theoretic loss FD grad-check (detached reference point, both labels)");
     pol_init(8, 4, 2, 3, 99); dpo_init();          # V=8 D=4, example length n=2

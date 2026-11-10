@@ -119,19 +119,27 @@ fn dpo_seqlogp_ref(states, actions, n): i64 {
     return lp;
 }
 
-# DPO implicit-reward margin Δ for a preference pair (winner ≻ loser), each n steps.
-fn dpo_delta(stW, acW, stL, acL, n, beta): i64 {
-    var rw = f64_sub(dpo_seqlogp_theta(stW, acW, n), dpo_seqlogp_ref(stW, acW, n));   # log π_θ(w) − log π_ref(w)
-    var rl = f64_sub(dpo_seqlogp_theta(stL, acL, n), dpo_seqlogp_ref(stL, acL, n));
+# DPO implicit-reward margin Δ for a preference pair (winner ≻ loser) whose two sides
+# have their own lengths: the winner's nW steps, the loser's nL (the full-sequence DPO
+# objective; added 1.3.0).
+fn dpo_delta2(stW, acW, nW, stL, acL, nL, beta): i64 {
+    var rw = f64_sub(dpo_seqlogp_theta(stW, acW, nW), dpo_seqlogp_ref(stW, acW, nW));   # log π_θ(w) − log π_ref(w)
+    var rl = f64_sub(dpo_seqlogp_theta(stL, acL, nL), dpo_seqlogp_ref(stL, acL, nL));
     return f64_mul(beta, f64_sub(rw, rl));
 }
 
-# forward-only DPO loss for a pair = −ln σ(Δ) = bt_loss(Δ, 0). The FD grad-check
-# perturbs a POLICY param and calls this (the reference is frozen, so only the θ
-# log-probs move — exactly what the analytic gradient flows into).
-fn dpo_pair_loss(stW, acW, stL, acL, n, beta): i64 {
-    return bt_loss(dpo_delta(stW, acW, stL, acL, n, beta), f64_from(0));
+# DPO margin Δ with both sides n steps (dpo_delta2 at nW = nL = n)
+fn dpo_delta(stW, acW, stL, acL, n, beta): i64 { return dpo_delta2(stW, acW, n, stL, acL, n, beta); }
+
+# forward-only DPO loss for a pair = −ln σ(Δ) = bt_loss(Δ, 0), each side at its own
+# length. The FD grad-check perturbs a POLICY param and calls this (the reference is
+# frozen, so only the θ log-probs move — exactly what the analytic gradient flows into).
+fn dpo_pair_loss2(stW, acW, nW, stL, acL, nL, beta): i64 {
+    return bt_loss(dpo_delta2(stW, acW, nW, stL, acL, nL, beta), f64_from(0));
 }
+
+# forward-only DPO loss with both sides n steps
+fn dpo_pair_loss(stW, acW, stL, acL, n, beta): i64 { return dpo_pair_loss2(stW, acW, n, stL, acL, n, beta); }
 
 # accumulate one sequence's scaled policy gradient into G_*: rl.cyr's seed kernel
 # pol_seed_bwd (probs − onehot)·scale at every step (no loss return; DPO drives its
@@ -147,17 +155,22 @@ fn pol_accum_scaled(states, actions, n, scale): i64 {
     return 0;
 }
 
-# DPO backward for one preference pair → accumulates into G_E/G_W/G_b. coef = β·(1−σ(Δ));
-# winner seeded with +coef (raise log π_θ(w)), loser with −coef (lower log π_θ(l)).
-# Gradient DESCENT on L = −ln σ(Δ) therefore increases Δ — the preference direction.
-# Returns the pair loss.
-fn dpo_backward_pair(stW, acW, stL, acL, n, beta): i64 {
-    var d = dpo_delta(stW, acW, stL, acL, n, beta);
+# DPO backward for one preference pair, each side at its own length → accumulates into
+# G_E/G_W/G_b. coef = β·(1−σ(Δ)); winner seeded with +coef (raise log π_θ(w)), loser with
+# −coef (lower log π_θ(l)). Gradient DESCENT on L = −ln σ(Δ) therefore increases Δ — the
+# preference direction. Returns the pair loss.
+fn dpo_backward_pair2(stW, acW, nW, stL, acL, nL, beta): i64 {
+    var d = dpo_delta2(stW, acW, nW, stL, acL, nL, beta);
     var s = sigma_stable(d);
     var coef = f64_mul(beta, f64_sub(f64_from(1), s));     # β·(1 − σ(Δ))
-    pol_accum_scaled(stW, acW, n, coef);
-    pol_accum_scaled(stL, acL, n, f64_neg(coef));
+    pol_accum_scaled(stW, acW, nW, coef);
+    pol_accum_scaled(stL, acL, nL, f64_neg(coef));
     return bt_loss(d, f64_from(0));
+}
+
+# DPO backward for one pair with both sides n steps (dpo_backward_pair2 at nW = nL = n)
+fn dpo_backward_pair(stW, acW, stL, acL, n, beta): i64 {
+    return dpo_backward_pair2(stW, acW, n, stL, acL, n, beta);
 }
 
 # ---- RLHF KL-to-reference-policy penalty -------------------------------------
@@ -191,8 +204,7 @@ fn kl_backward_state(x, beta): i64 {
         store64(S_probs + k * 8, f64_mul(beta, f64_mul(pk, f64_sub(fk, kl))));
         k = k + 1;
     }
-    linear_bwd(P_E + x * g_D * 8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
-    t_add_into(G_E + x * g_D * 8, S_demb, g_D);
+    pol_bwd_seeded(x);
     return 0;
 }
 

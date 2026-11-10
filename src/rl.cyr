@@ -21,18 +21,25 @@ var g_T = 0;        # rollout length (sampled actions per rollout)
 var g_target = 0;   # reward target token id
 
 # ---- hardening: fail-loud precondition guard (0.8.0 audit) ------------------
+var _guard_buf[64];     # module scope: 64 i64 slots = 512 bytes for guard's composed message
+
 # Cyrius has no bounds checks: an out-of-range store64 silently corrupts the heap.
 # Public entries that index fixed-size buffers (beam width vs BMAX, GRPO group vs
 # GMAX) call guard() to turn a silent overrun into a clear abort. A no-op when the
 # precondition holds (every current call site satisfies them), so demo/tests are
-# byte-identical. (stdlib `assert` only PRINTS, it does not stop — hence this.)
+# byte-identical. Since 1.3.0 it aborts through the stdlib's panic, which writes
+# "panic: tarka: precondition violated: <msg>" to stderr and exits 1. The message is
+# composed in a static buffer, not the heap: a guard may fire before alloc_init, and it
+# must not depend on the state it protects.
 fn guard(cond, msg): i64 {
     if (cond == 0) {
-        var n = 0; while (load8(msg + n) != 0) { n = n + 1; }
-        syscall(1, 2, "tarka: precondition violated: ", 30);
-        syscall(1, 2, msg, n);
-        syscall(1, 2, "\n", 1);
-        syscall(SYS_EXIT, 1);
+        var pre = "tarka: precondition violated: ";
+        var o = 0; var i = 0;
+        while (load8(pre + i) != 0) { store8(&_guard_buf + o, load8(pre + i)); o = o + 1; i = i + 1; }
+        i = 0;
+        while ((load8(msg + i) != 0) && (o < 511)) { store8(&_guard_buf + o, load8(msg + i)); o = o + 1; i = i + 1; }
+        store8(&_guard_buf + o, 0);
+        panic(&_guard_buf);
     }
     return 0;
 }
@@ -80,7 +87,13 @@ fn memo_begin(): i64 {
 }
 
 # leave a memo region
-fn memo_end(): i64 { g_memo_depth = g_memo_depth - 1; return 0; }
+fn memo_end(): i64 {
+    g_memo_depth = g_memo_depth - 1;
+    # every training loop applies its deferred gradients (pol_scale_grads / pol_adam_step)
+    # before its region closes; a pending row left here would be a gradient silently lost
+    if (g_memo_depth == 0) { guard(PB_n == 0, "memo_end: a deferred policy gradient was never applied"); }
+    return 0;
+}
 
 # S_probs = pi(.|x): computed, or inside a memo region copied from the cache when the
 # row was filled at the current parameter version.
@@ -125,6 +138,7 @@ fn pol_init(V, D, T, target, seed): i64 {
     R_states = t_alloc(T); R_actions = t_alloc(T);
     PM_probs = t_alloc(V * V); PM_stamp = t_alloc(V); t_zero(PM_stamp, V);
     PM_epoch = PM_epoch + 1;                 # new parameters: no cached row is valid
+    PB_rows = t_alloc(V * V); PB_list = t_alloc(V); PB_mark = t_alloc(V); PB_n = 0;
     # small init so early logits are near-uniform
     t_randn(P_E, V * D, f64_div(f64_from(1), f64_from(10)));   # std 0.1
     t_randn(P_W, D * V, f64_div(f64_from(1), f64_from(10)));
@@ -231,14 +245,79 @@ fn rl_reward(): i64 {
 }
 
 # zero the policy gradient accumulators G_E / G_W / G_b
+# zero the policy gradient accumulators G_E / G_W / G_b, and drop any deferred rows
 fn pol_zero_grads(): i64 {
+    pol_bwd_discard();
     t_zero(G_E, g_V * g_D); t_zero(G_W, g_D * g_V); t_zero(G_b, g_V);
     return 0;
 }
 
-# scale the policy gradient accumulators by s (the 1/batch mean before an Adam step)
+# scale the policy gradient accumulators by s (the 1/batch mean before an Adam step),
+# after applying the deferred rows
 fn pol_scale_grads(s): i64 {
+    pol_bwd_flush();
     t_scale(G_E, g_V * g_D, s); t_scale(G_W, g_D * g_V, s); t_scale(G_b, g_V, s);
+    return 0;
+}
+
+# ---- the aggregated backward (1.3.0) ------------------------------------------------
+# Every token of one state x shares the embedding row E[x], so the backward is linear in
+# the seed: the sum over x's tokens of linear_bwd(E[x], seed_t) is linear_bwd(E[x], the sum
+# of the seeds). Inside a memo region (tarka's own training loops) pol_bwd_seeded therefore
+# adds each seed into a pending row for its state, and pol_bwd_flush runs ONE linear_bwd
+# per touched state, in first-touch order, when the gradient is next needed
+# (pol_scale_grads, pol_adam_step). A REINFORCE step at V 28 runs 28 backwards instead of
+# 384. The sums are reordered, so the bits differ from the per-token backward — a labeled
+# behavior change (ADR 0002). Outside a region the backward stays immediate, so a caller
+# that reads G_* right after a backward (the grad-checks) sees it at once.
+var PB_rows = 0;    # V*V  the pending sum of seeds, row x
+var PB_list = 0;    # V    the states with a pending row, in first-touch order
+var PB_mark = 0;    # V    1 while state x has a pending row
+var PB_n = 0;       # how many states have a pending row
+
+# S_probs holds the seed dlogits for state x: back-propagate it into G_* now, or (inside
+# a memo region) add it to x's pending row
+fn pol_bwd_seeded(x): i64 {
+    if (g_memo_depth == 0) {
+        linear_bwd(P_E + x * g_D * 8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
+        t_add_into(G_E + x * g_D * 8, S_demb, g_D);
+        return 0;
+    }
+    if (load64(PB_mark + x * 8) == 0) {
+        store64(PB_mark + x * 8, 1);
+        store64(PB_list + PB_n * 8, x);
+        PB_n = PB_n + 1;
+    }
+    t_add_into(PB_rows + x * g_V * 8, S_probs, g_V);
+    return 0;
+}
+
+# apply every pending row: one linear_bwd per touched state, then clear it
+fn pol_bwd_flush(): i64 {
+    var i = 0;
+    while (i < PB_n) {
+        var x = load64(PB_list + i * 8);
+        var row = PB_rows + x * g_V * 8;
+        linear_bwd(P_E + x * g_D * 8, P_W, row, S_demb, G_W, G_b, 1, g_D, g_V);
+        t_add_into(G_E + x * g_D * 8, S_demb, g_D);
+        t_zero(row, g_V);
+        store64(PB_mark + x * 8, 0);
+        i = i + 1;
+    }
+    PB_n = 0;
+    return 0;
+}
+
+# drop every pending row unapplied (pol_zero_grads starts the gradient over)
+fn pol_bwd_discard(): i64 {
+    var i = 0;
+    while (i < PB_n) {
+        var x = load64(PB_list + i * 8);
+        t_zero(PB_rows + x * g_V * 8, g_V);
+        store64(PB_mark + x * 8, 0);
+        i = i + 1;
+    }
+    PB_n = 0;
     return 0;
 }
 
@@ -253,8 +332,7 @@ fn pol_seed_bwd(x, a, X): i64 {
     guard((a >= 0) && (a < g_V), "pol_seed_bwd: action token out of range (0..V-1)");
     store64(S_probs + a * 8, f64_sub(load64(S_probs + a * 8), f64_from(1)));
     t_scale(S_probs, g_V, X);
-    linear_bwd(P_E + x * g_D * 8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
-    t_add_into(G_E + x * g_D * 8, S_demb, g_D);
+    pol_bwd_seeded(x);
     return 0;
 }
 
@@ -306,6 +384,7 @@ fn adam_one(P, G, M, Vv, n, lr): i64 { return adam_kernel(P, G, M, Vv, n, lr, g_
 
 # advance the policy's bias-correction powers one step, then Adam-update E, W and b
 fn pol_adam_step(lr): i64 {
+    pol_bwd_flush();                         # apply any deferred rows first
     PM_epoch = PM_epoch + 1;                 # the parameters change: retire cached rows
     g_b1t = f64_mul(g_b1t, ADAM_B1());
     g_b2t = f64_mul(g_b2t, ADAM_B2());
