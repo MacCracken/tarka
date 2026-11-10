@@ -252,21 +252,9 @@ Direct (declared in `cyrius.cyml`):
 _None yet._ (Long-horizon: a sovereign agent/reasoning runtime — daimon-adjacent —
 is the eventual downstream.)
 
-## Next (version plan)
+## Next
 
-- **0.7.0 — ✅ done**: PRM-guided beam search (the reasoning arc is closed).
-- **0.8.0 — ✅ done**: security/hardening audit (0 reachable bugs; precondition guards) + pin 6.2.37.
-- **0.9.0 — ✅ done**: benchmarks.md (v1.0 criterion) + doc polish + Adam loop-invariant hoist.
-- **1.0.0 — ✅ SHIPPED**: clean cut — API freeze (`docs/api.md`) + downstream consumer
-  (`examples/quickstart.cyr`); all six v1.0 criteria met. **tarka is v1.0.**
-
-## Post-1.0
-
-The reference is complete. Natural next levers (post-1.0, user-driven): a `--gpu` backend
-(rosnet-gpu + mabda), MCTS on a task that warrants it, or extracting reusable primitives to a
-shared lib (the rosnet/tyche/akshara pattern) once a second consumer appears. From the 1.2.2
-audit, each a labeled behavior change (they move bits): a per-state aggregated backward
-(`linear_bwd` now dominates a training step), and a two-length DPO / IPO primitive so a pair is
-scored at each side's own length rather than the shared minimum.
-
-See [`roadmap.md`](roadmap.md).
+1.3.x: a per-state aggregated backward, a two-length DPO / IPO primitive, `--pref` training
+knobs, and `guard()` on the stdlib's `panic`; then MCTS (1.4.x) and a GPU backend (1.5.x). The
+2.0.0 backlog holds the changes that would break the frozen 1.x API. See
+[`roadmap.md`](roadmap.md).

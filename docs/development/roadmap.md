@@ -1,153 +1,80 @@
 # tarka — Roadmap
 
-> Milestone plan through v1.0. State lives in [`state.md`](state.md);
-> this file is the sequencing — what ships, in what order, against
-> what dependency gates.
+> What ships next, by release line. Shipped work is in [`CHANGELOG.md`](../../CHANGELOG.md)
+> (0.1.0 → 1.2.2); live state is in [`state.md`](state.md).
+>
+> **The 1.x rule.** A 1.x release may add symbols to the frozen API ([`docs/api.md`](../api.md))
+> and may move results as a *labeled behavior change* — it re-records the golden cases it
+> touches and names them in the CHANGELOG ([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
+> It may not change or remove a frozen signature. Anything that would is in the
+> [2.0.0 backlog](#200-backlog--breaks-the-frozen-1x-api).
 
-## v1.0 criteria — ✅ ALL MET (shipped 1.0.0, 2026-06-22)
+## 1.3.x — training throughput and preference fidelity
 
-- [x] Public RL/reasoning API frozen — documented ([`docs/api.md`](../api.md)) and tested (1.0.0)
-- [x] Every hand-derived backward op finite-difference grad-checked (attn11 discipline) — **24/24**
-- [x] Benchmarks captured in [`docs/benchmarks.md`](../benchmarks.md) (0.9.0)
-- [x] At least one downstream consumer green — [`examples/quickstart.cyr`](../../examples/quickstart.cyr) (1.0.0)
-- [x] CHANGELOG complete from v0.1.0 onward
-- [x] Security audit pass — [`docs/audit/2026-06-22-audit.md`](../audit/2026-06-22-audit.md) (0.8.0: 0 reachable bugs)
+Each item is a behavior change under ADR 0002: every demo and `--pref` gate stays green, the
+grad-checks hold, and the golden cases it moves are re-recorded and named.
 
-## Milestones
+- **Per-state aggregated backward.** `linear_bwd` now dominates a training step (≈ 0.9 µs per
+  token at V 28, D 8; a REINFORCE step runs 384). For a bigram, every token of one state shares
+  one embedding row, so summing a batch's seeds per state and running one backward per state cuts
+  the work by the batch's repetition factor. It reorders the gradient's sums, which is why it is
+  not an optimization. *Done when:* the REINFORCE / PPO / GRPO / DPO / KTO step rows of
+  `bench-history.csv` drop, measured in one session against 1.2.2.
+- **A two-length preference primitive (additive).** DPO / IPO score both sides of a pair at the
+  shared minimum length (the single-n `dpo_backward_pair` / `ipo_backward_pair` / `dpo_delta`).
+  Add variants that take each side's own length — the standard DPO objective — FD grad-checked,
+  alongside the single-n ones; `--pref` switches to them, so an unequal pair is no longer
+  truncated. *Done when:* the new primitives pass their grad-checks and a pair whose sides differ
+  only past the shorter one's end trains (today it is refused as identical spans).
+- **`--pref` training knobs.** Epochs (300 per optimizer), learning rate (0.05) and embedding
+  dim (8) are compiled in; at the caps with a large vocab a run takes tens of seconds (41 s for
+  the 2026-11-09 review's 103 KB file at V 92). Add flags with today's values as defaults, and
+  optionally stop an optimizer once its gate holds. *Done when:* the default run is
+  byte-identical to 1.2.2's.
+- **`guard()` on the stdlib's `panic`.** `lib/assert.cyr` now has `panic` / `assert_fatal`, which
+  SECURITY.md's residual note was waiting for. Keep the `tarka: precondition violated: <msg>`
+  line and exit status 1 — the 13 abort probes check both.
 
-### Scaffold (v0.1.0) — ✅ shipped 2026-06-22
+## 1.4.x — search
 
-- `cyrius init` scaffold landed; identity + attn11 boundary documented.
-- Deps wired: rosnet 0.2.0 (CPU) + tyche 0.1.1.
-- [ADR 0001](../adr/0001-tarka-scope-and-rl-migration.md) — scope + migration boundary.
+- **MCTS on a task that warrants it.** 0.7.0 scoped it out: the search task is deterministic with
+  one good action per step, where beam search is the right tool. MCTS needs a task where value
+  backup matters — stochastic transitions, or several good actions with delayed payoff — and is
+  measured against beam on the existing matched-compute harness (`g_fwd`, uncached).
 
-### REINFORCE migration (v0.2.0) — core shipped 2026-06-22
+## 1.5.x — GPU backend
 
-Bring attn11's `--objective rl` home and **re-express it on rosnet** (not a literal
-copy of attn11's in-model seeding). On-policy REINFORCE: sample rollouts from the
-current policy, score with a deterministic reward, weight the log-prob gradient by
-the advantage `(R − b)` with an EMA baseline `b`.
+- **`--gpu` through rosnet's GPU bundle** (rosnet-gpu + mabda). The CPU path stays the reference
+  oracle: its golden digests do not move, and GPU results are checked against it within rosnet's
+  bit-exact / tolerance classes. The prerequisites are met: the GPU bundle compiles at cyrius
+  ≥ 6.6.19 (the pin is 6.7.18), and since rosnet 1.2.2 it no longer needs the consumer to define
+  `puts`.
 
-- **Dep gate**: tokenizer **extracts to a small shared lib** (decided 2026-06-22 —
-  "extraction for reuse"; tarka is the 2nd consumer, parallels rosnet/tyche). **Lib
-  name locked: `akshara`** (अक्षर — indivisible text/sound unit). Carve happens in
-  attn11's 1.x extract/re-fold window; tarka consumes `akshara`.
-- **Acceptance**: the X024 gate reproduces here (target-token frequency rises decisively
-  under RL); the REINFORCE backward is finite-difference grad-checked — the same
-  discipline that gated it in attn11.
-- **Progress (core ✅)**: `src/rl.cyr` — minimal rosnet-backed policy + REINFORCE +
-  Adam landed. Demo: rollout target frequency **1.56 → 24.00 / 24** under REINFORCE.
-  Grad-checks **4/4 green** (policy dW/dE/db FD-verified, maxrel ≤ 2e-9; RL
-  advantage-scaling `grad(A) == A·grad(1)` exact). Uses a synthetic vocab for now.
-- **akshara wired ✅ (0.2.1)**: `[deps.akshara]` 0.1.0; `rl_prompt` draws from a real
-  akshara-tokenized corpus (`corpus_set` + `gd_ld`). Demo: 45 B → vocab 28, space
-  token reward, freq 1.00 → 24.00. Grad-checks 4/4 green, warning-free build.
-- **Remaining to close M1**: **attn11 side** (separate, user-confirmed): remove
-  `--objective rl` + RL surface; attn11 reverts to a pure SFT/diffusion reference.
+## 1.x.x — unscheduled
 
-### GRPO / PPO + value critic (v0.3.0) — ✅ shipped 2026-06-22
+Recorded so they are not lost; each waits for a caller that needs it.
 
-The documented attn11 follow-on, now tarka's. Add a value head (critic), GAE
-advantage estimation, and a clipped surrogate (PPO) / group-relative (GRPO) objective.
+- **A `PMIN` floor for `f64_ln`.** A probability that underflows to exactly 0 gives `−inf`. Both
+  audits accepted it: max-shifted softmax keeps probabilities positive on every path tarka drives.
 
-- **Acceptance**: critic + GAE + clipped objective grad-checked; a control task where
-  PPO/GRPO measurably beats bare REINFORCE on sample efficiency.
-- **Core ✅ (in-flight)**: `src/actorcritic.cyr` — critic + GAE + PPO + GRPO, math adversarially
-  verified (8-agent design workflow vs Schulman/DeepSeek) then **grad-checked: +15 checks,
-  19/19 green** (critic FD-exact; GAE recursion==explicit; PPO ρ=1==REINFORCE + clip→0;
-  GRPO group-norm + ratio=1==REINFORCE). Demo: all three learn (PPO 0.81→23.78, GRPO →24.00).
-- **Acceptance ✅**: parity control task + **rollouts-to-threshold** benchmark
-  (`src/parity.cyr`, median of 5 seeds): **PPO 32, GRPO 160, REINFORCE 192** — PPO/GRPO
-  measurably more sample-efficient. Cut at **0.3.0**.
+## 2.0.0 backlog — breaks the frozen 1.x API
 
-### Reward & process-reward models (v0.4.0–0.4.1) — ✅ complete 2026-06-22
+- **Retire the single-n preference signatures** once the two-length ones (1.3.x) have a release
+  behind them.
+- **Drop the unused `log_every` parameter** of `rl_train`, `ppo_train` and `grpo_train`: no code
+  reads it, and every caller passes a value that does nothing.
+- **Model handles instead of module globals.** The policy, the frozen reference and the reward
+  model are module-global state (`g_V` / `g_D` / `g_T`, `P_*`), one of each per process; 1.2.2's
+  dims guards (`ac_ready`, `dpo_ready`, `rm_reward`, `srch_beam`) exist because a `pol_init` can
+  silently invalidate another module's buffers. A handle per model (its dims, parameters and
+  cache) would make the reference a second policy instance rather than a parallel copy of the
+  policy code, and the guards structural.
+- **Extract reusable primitives to a shared lib** (the rosnet / tyche / akshara pattern) once a
+  second consumer appears. It moves public symbols out of tarka.
 
-Learned reward models (outcome) and process-reward models (per-step), replacing the
-hand-coded scalar reward — the substrate for verifier-guided reasoning.
-- **Shipped**: `src/reward.cyr` — Bradley-Terry reward model `r_θ(s,a)` (own embedding,
-  stable log-sigmoid), grad-checked (**24/24**, +5 incl. the BT descent-direction
-  falsifier), design-reviewed vs Christiano/Ouyang/Lightman.
-- **Acceptance (non-circular)**: RM held-out preference accuracy **100%** from orderings
-  alone; a fresh policy RL'd on only the frozen learned reward reaches **15.52/16 true
-  reward** (`src/preference.cyr`). Cut at **0.4.0**.
-- **0.4.1 — completed with the outcome RM (ORM)** + process-vs-outcome comparison: ORM
-  (whole-rollout prefs → GRPO) **13.64/16** vs PRM (step-level → PPO) **15.54/16** — both
-  transmit; process supervision wins (Lightman 2023). Right RL per reward shape:
-  per-step→PPO+GAE, terminal→GRPO (group-norm cancels the BT offset).
+## Out of scope
 
-### Verifier-guided reasoning (v0.5.0–0.7.0) — ✅ complete 2026-06-22
-
-The "thinking" half: multi-step chain-of-thought rollouts, self-consistency
-(sample-and-vote), then verifier-guided search → tree search / MCTS over reasoning
-steps, scored by the learned reward/process models.
-- **0.5.0 (start) — outcome-level deliberation** (`src/reasoning.cyr`), adversarially
-  design-reviewed (Wang/Cobbe/Gao): **self-consistency** answer accuracy 627→797→930
-  (votes N=1→16→64); **verifier best-of-N** true reward 892 vs 530 mean, ~oracle 894
-  (near-perfect PRM verifier). Reasoning task = parity-chain answer; policy made
-  imperfect via partial training. Additive (24 grad-checks intact).
-- **0.7.0 — tree search ✅** (`src/search.cyr`): a genuine-search task (generate a TARGET
-  token the policy never favors → greedy ≈ 0, best-of-N ≈ V⁻ᵀ) + **PRM-guided beam search**
-  that steers generation to it. Matched compute (1152 fwd/prompt, #TARGET of 16): **greedy
-  0.20 / best-of-N 4.05 / beam 13.50** — beam 3.3× best-of-N, 67× greedy. Search is necessary.
-  (MCTS scoped out: deterministic + one-good-action → beam is the right tool; post-1.0 lever.)
-
-## Path to v1.0 (version plan)
-
-The feature arc above (REINFORCE → actor-critic → reward models → reasoning) is built;
-the remaining versions are about finish quality.
-
-- **0.6.0 — ✅ refactor**: descriptive names replace the `Mx` milestone codes throughout
-  the code (no behavior change; 24/24 grad-checks + all gates unchanged).
-- **0.7.0 — ✅ tree search**: PRM-guided beam search on a genuine-search task (greedy 0.20 /
-  best-of-N 4.05 / beam 13.50 of 16 at matched compute). The reasoning arc is closed.
-- **0.8.0 — ✅ security/hardening audit**: 6-dimension find→verify workflow — 0 reachable bugs,
-  fail-loud precondition guards (beam/GRPO buffer caps, count knobs) + pin 6.2.37.
-  [`docs/audit/2026-06-22-audit.md`](../audit/2026-06-22-audit.md).
-- **0.9.0 — ✅ optimization + documentation**: [`docs/benchmarks.md`](../benchmarks.md)
-  (v1.0 criterion) + README/getting-started polish + Adam loop-invariant hoist (byte-identical
-  numerics; the demo is rollout/matmul-bound, so no wall-clock change — kept for leanness).
-- **1.0.0 — ✅ SHIPPED** (clean cut): public API frozen + documented ([`docs/api.md`](../api.md)),
-  downstream consumer green ([`examples/quickstart.cyr`](../../examples/quickstart.cyr)),
-  CHANGELOG complete. **All six v1.0 criteria met — tarka is v1.0.**
-
-## Post-1.0 (shipped)
-
-- **1.1.0 — ✅ alignment: DPO + RLHF KL-to-reference-policy penalty** (`src/dpo.cyr`). Two
-  charter-owned pieces tarka lacked, both over a frozen reference policy, both hand-derived +
-  FD-grad-checked (suite **24/24 → 34/34**), both additive to the frozen 1.x API.
-  - **DPO** (Rafailov 2023): reparametrize the Bradley-Terry loss onto the policy —
-    `Δ = β·[(log π_θ − log π_ref)_w − (...)_l]`, `L = −ln σ(Δ)`, β=0.1. Reuses `reward.cyr`'s
-    `bt_loss` + `rl.cyr`'s softmax-CE seed; no reward model / critic / sampler. Demo: target
-    frequency **0.94 → 24.00 / 24** from preferences alone.
-  - **KL-to-reference penalty** (Ouyang 2022 / TRL `init_kl_coef`): `β·KL(π_θ‖π_ref)`,
-    `dKL/dlogit_k = p_k·(f_k − KL)`. Demo: pulls mean KL **3.33 → 2.46**.
-  - Surfaced by the 2026-06-25 ifran/secureyeoman product-mining (both ship DPO/RLHF as Python
-    wrappers — demand evidence). The IPO/KTO follow-ons shipped in **1.1.1** (2026-06-27,
-    `src/preference_ext.cyr`) — the standard preference-loss set is complete.
-  - **1.1.2 (2026-07-05): `--pref` preference-file ingestion** (`src/pref_ingest.cyr`) — trains
-    DPO/IPO/KTO from an ifran `pref export` JSONL (curated preferences in, aligned policy out;
-    ifran Lane 3 closed). E2E proven: DPO/IPO ranked 3/3 with loss → 0, KTO gap 0 → 238.
-- **1.1.3 – 1.2.1 — toolchain and substrate realigns** (cyrius 6.5.27 → 6.7.18; tyche / rosnet /
-  akshara to their 1.x releases). No method change.
-- **1.2.2 (2026-11-09) — ✅ P(-1) sweep** ([audit](../audit/2026-11-09-audit.md)): the first audit
-  of `--pref` (one HIGH — an escape-decoded byte's id −1 indexed the policy — and four MEDIUM,
-  fixed), the IPO/KTO gate counted, `ipo_mean_h` ties, guards for 0 knobs and stale dims, shared
-  kernels and a per-state distribution memo (bit-identical, demo 3.5× faster), a golden gate,
-  suites 73 → 190, a fuzz harness, and CI that runs every gate on x86_64 and aarch64.
-
-## Next candidates (each a labeled behavior change — they move bits, ADR 0002)
-
-- **Per-state aggregated backward.** `linear_bwd` now dominates a training step; summing each
-  state's seeds before one backward per state would cut it by the batch's repetition factor, but
-  reorders the gradient's sums.
-- **Two-length DPO / IPO primitive.** Score each side of a pair at its own length instead of the
-  shared minimum (the standard DPO objective); changes every unequal pair's training.
-
-## Out of scope (for v1.0)
-
-- **The transformer itself** — that's attn11/rosnet. tarka consumes the policy
-  network; it does not re-implement attention.
-- **GPU execution** — CPU is the reference oracle through v1.0; a `--gpu` backend
-  (rosnet-gpu + mabda) is a post-1.0 lever, mirroring attn11's M18 sequencing.
-- **A production agent runtime** — tarka is the *reference*; the runtime is
-  downstream (daimon-adjacent).
+- **The transformer itself** — that is attn11 / rosnet. tarka consumes a policy network; it does
+  not re-implement attention.
+- **A production agent runtime** — tarka is the reference; the runtime is downstream
+  (daimon-adjacent).

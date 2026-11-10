@@ -67,6 +67,7 @@ tarka *does not* defend against:
 
 ## Residual notes
 
-- The guards depend on a local fail-loud `guard()` because stdlib `assert` only
-  *prints* and continues.
+- The guards use a local fail-loud `guard()`, written when the stdlib's `assert` only
+  printed. The stdlib now has `panic` / `assert_fatal`; moving `guard()` onto it, keeping
+  its message and exit status, is a 1.3.x roadmap item.
 - The accepted residual (an `f64_ln` `PMIN` floor) is robustness, not memory safety.
