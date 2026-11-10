@@ -1,0 +1,556 @@
+# tarka — prior-guided Monte Carlo tree search (1.4.0): PUCT with a learned policy prior
+# and a learned value, against beam searches given the same networks.
+#
+# 0.7.0 scoped MCTS out: its search task is deterministic with one good action per step,
+# where beam search is the right tool. This module gives MCTS a task where a step's worth
+# shows only later (docs/adr/0003-prior-guided-mcts.md):
+#
+#   THE CORRIDOR. Three key tokens K1 → K2 → K3, entered in that order, each worth 0, open
+#   a GOAL token worth +4 per step (from K3 or from GOAL). A TRAP token is worth +1 from
+#   anywhere, every step. Entering K2, K3 or GOAL out of order costs MC_PEN (−60: more than
+#   the horizon can repay, so the corridor is the only way to GOAL); any other token is 0.
+#   Over T = 16 the optimum from a neutral prompt is K1 K2 K3 GOAL×13 = 52; TRAP×16 = 16.
+#
+# The evaluator is the task's reward r* itself — an exact checker, as in planning with a
+# simulator or a test suite — counted per call. (A learned Bradley-Terry verifier blurred the
+# corridor's zero-reward steps or, with the −60 penalties it cannot represent, was exploited:
+# see the ADR.) The networks MCTS and the beams share:
+#   - the PRIOR π: behavior-cloned from imperfect demonstrations (30% follow the optimal
+#     plan, 70% the TRAP, every action randomized with probability 0.2) — a policy that has
+#     seen the solution without making it its mode, the way a pretrained model has;
+#   - the VALUE V: the actor-critic value head (src/actorcritic.cyr), trained by policy
+#     evaluation of π on r* (GAE returns), with π frozen.
+# (On-policy PPO on r* is captured by the TRAP within 50 steps — π(TRAP) 0.99 — and gives
+# an uninformative prior: also in the ADR.)
+#
+# Methods, all at the 0.7.0 harness's accounting (g_fwd: one per policy forward, critic
+# forward or evaluator call; nothing cached):
+#   - policy greedy (argmax π); best-of-N π samples by their r* return;
+#   - beam, four ways (mc_beam): exhaustive and myopic (rank by cumulative r*); exhaustive
+#     with V (rank by cumulative r* + V(child)); K children sampled from π, myopic; and K
+#     children from π ranked with V — the beam given everything MCTS is given;
+#   - MCTS: PUCT (Silver et al. 2017; Rosin 2011): descend by Q/MC_QSCALE + c·P·√N/(1+n),
+#     expand a leaf with π's priors (one policy forward), evaluate it with V scaled to the
+#     steps left (one critic forward), back the return up; re-plan every step from the
+#     committed node, keeping its subtree, and commit the most-visited child.
+#
+# The honest result (the demo's gate; docs/benchmarks.md § 9): lookahead from the learned
+# value is what solves the corridor. MCTS reaches the optimum where greedy, best-of-N and
+# the myopic beams do not — and a beam given the same prior and value does as well, at
+# about half MCTS's compute. On a deterministic task the tree search adds nothing a value-
+# ranked beam lacks; MCTS's own advantages (stochastic or adversarial dynamics, horizons
+# too long for a beam's diversity) are not in this task.
+#
+# Include AFTER src/search.cyr (cnt_logits, cnt_rollout, pol_argmax, g_fwd),
+# src/preference.cyr (RUNI) and src/actorcritic.cyr (vval, the critic, gae_*).
+
+# the corridor task: vocab size
+fn MC_V(): i64 { return 12; }
+# the corridor task: embedding dim
+fn MC_D(): i64 { return 8; }
+# the corridor task: sequence length
+fn MC_T(): i64 { return 16; }
+# the token worth +1 from anywhere
+fn MC_TRAP(): i64 { return 1; }
+# the first key (0 from anywhere)
+fn MC_K1(): i64 { return 2; }
+# the second key (0 after K1)
+fn MC_K2(): i64 { return 3; }
+# the third key (0 after K2)
+fn MC_K3(): i64 { return 4; }
+# the goal (+4 after K3 or GOAL)
+fn MC_GOAL(): i64 { return 5; }
+# the cost of entering K2, K3 or GOAL out of order (more than the horizon can repay)
+fn MC_PEN(): i64 { return f64_from(0 - 60); }
+# the scale PUCT divides Q by, so it is commensurate with the prior term (4 per step × T)
+fn MC_QSCALE(): i64 { return f64_from(64); }
+
+# the true reward of one step (f64): the task's definition
+fn mc_true_r(x, a): i64 {
+    if (a == MC_TRAP()) { return f64_from(1); }
+    if (a == MC_K2()) { if (x == MC_K1()) { return f64_from(0); } return MC_PEN(); }
+    if (a == MC_K3()) { if (x == MC_K2()) { return f64_from(0); } return MC_PEN(); }
+    if (a == MC_GOAL()) {
+        if ((x == MC_K3()) || (x == MC_GOAL())) { return f64_from(4); }
+        return MC_PEN();
+    }
+    return f64_from(0);
+}
+
+# the true return of a stored T-step sequence
+fn mc_true_return(st, ac): i64 {
+    var s = f64_from(0); var t = 0;
+    while (t < g_T) { s = f64_add(s, mc_true_r(load64(st + t * 8), load64(ac + t * 8))); t = t + 1; }
+    return s;
+}
+
+# one counted evaluator call: r*(x, a)
+fn mc_score(x, a): i64 { g_fwd = g_fwd + 1; return mc_true_r(x, a); }
+
+# one counted critic forward: V(x)
+fn mc_value(x): i64 { g_fwd = g_fwd + 1; return vval(x); }
+
+# ---- the optimum: dynamic programming over r* -------------------------------------------
+# MC_dv[m * V + x] = the best return of m steps from state x (deterministic: x' = a)
+var MC_dv = 0;
+var MC_dvT = 0;     # the g_T the table was built for
+# build (or rebuild for a new T) the DP table
+fn mc_dp_table(): i64 {
+    if ((MC_dv != 0) && (MC_dvT == g_T)) { return 0; }
+    MC_dv = t_alloc((g_T + 1) * g_V);
+    var m = 1;
+    while (m <= g_T) {
+        var x = 0;
+        while (x < g_V) {
+            var best = f64_from(0); var a = 0;
+            while (a < g_V) {
+                var v = f64_add(mc_true_r(x, a), load64(MC_dv + ((m - 1) * g_V + a) * 8));
+                if ((a == 0) || (f64_gt(v, best) == 1)) { best = v; }
+                a = a + 1;
+            }
+            store64(MC_dv + (m * g_V + x) * 8, best);
+            x = x + 1;
+        }
+        m = m + 1;
+    }
+    MC_dvT = g_T;
+    return 0;
+}
+
+# the true optimum of T steps from prompt p
+fn mc_oracle_from(p): i64 { mc_dp_table(); return load64(MC_dv + (g_T * g_V + p) * 8); }
+
+# the optimal action from state x with m >= 1 steps left (ties: the lowest token)
+fn mc_opt_action(x, m): i64 {
+    mc_dp_table();
+    var best = 0; var bv = f64_from(0); var a = 0;
+    while (a < g_V) {
+        var v = f64_add(mc_true_r(x, a), load64(MC_dv + ((m - 1) * g_V + a) * 8));
+        if ((a == 0) || (f64_gt(v, bv) == 1)) { bv = v; best = a; }
+        a = a + 1;
+    }
+    return best;
+}
+
+var MS_st = 0; var MS_ac = 0;       # the sequence a method emits for one prompt (T steps)
+
+# the evaluation prompts: random tokens, the same set for every method
+fn mc_prompts(nprompts, base_seed): i64 {
+    rng_seed(base_seed);
+    var prompts = t_alloc(nprompts);
+    var i = 0; while (i < nprompts) { store64(prompts + i * 8, RUNI() % g_V); i = i + 1; }
+    return prompts;
+}
+
+# the mean true optimum over the evaluation prompts
+fn mc_oracle(nprompts, base_seed): i64 {
+    guard(nprompts >= 1, "mc_oracle: nprompts must be >= 1");
+    var prompts = mc_prompts(nprompts, base_seed);
+    var total = f64_from(0); var i = 0;
+    while (i < nprompts) { total = f64_add(total, mc_oracle_from(load64(prompts + i * 8))); i = i + 1; }
+    return f64_div(total, f64_from(nprompts));
+}
+
+# ---- the networks: a behavior-cloned prior and a policy-evaluation critic -------------
+# One demonstration into R_states / R_actions: a solver (the optimal action) or a TRAP
+# follower; each action replaced by a uniform token with probability eps (per mille), the
+# next state following whatever was emitted.
+fn mc_demo(p, solver, eps): i64 {
+    var x = p; var t = 0;
+    while (t < g_T) {
+        store64(R_states + t * 8, x);
+        var a = MC_TRAP();
+        if (solver == 1) { a = mc_opt_action(x, g_T - t); }
+        if ((RUNI() % 1000) < eps) { a = RUNI() % g_V; }
+        store64(R_actions + t * 8, a); x = a; t = t + 1;
+    }
+    return 0;
+}
+
+# Behavior-clone π: `steps` batches of `batch` demonstrations (solver with probability
+# psol per mille, noise eps per mille), softmax cross-entropy descent with Adam.
+fn mc_bc_train(steps, batch, lr, psol, eps): i64 {
+    guard(batch >= 1, "mc_bc_train: batch must be >= 1");
+    memo_begin();
+    var inv = f64_div(f64_from(1), f64_from(batch * g_T));
+    var s = 0;
+    while (s < steps) {
+        pol_zero_grads();
+        var b = 0;
+        while (b < batch) {
+            var solver = 0; if ((RUNI() % 1000) < psol) { solver = 1; }
+            mc_demo(RUNI() % g_V, solver, eps);
+            rl_backward(f64_from(1));
+            b = b + 1;
+        }
+        pol_scale_grads(inv);
+        pol_adam_step(lr);
+        s = s + 1;
+    }
+    memo_end();
+    return 0;
+}
+
+# r* into R_rewards for the current rollout (the critic's training signal)
+fn mc_fill_rewards(): i64 {
+    var t = 0;
+    while (t < g_T) {
+        store64(R_rewards + t * 8, mc_true_r(load64(R_states + t * 8), load64(R_actions + t * 8)));
+        t = t + 1;
+    }
+    return 0;
+}
+
+var MC_b1t = 0; var MC_b2t = 0;     # the critic's own Adam bias-correction powers
+# Policy evaluation: `steps` rollouts of the frozen π, the critic V regressed on their
+# GAE returns on r*, with its own Adam bias-correction powers.
+fn mc_critic_train(steps, lr): i64 {
+    ac_ready("mc_critic_train: call ac_init() after pol_init()");
+    MC_b1t = f64_from(1); MC_b2t = f64_from(1);
+    memo_begin();
+    var invT = f64_div(f64_from(1), f64_from(g_T));
+    var s = 0;
+    while (s < steps) {
+        rl_rollout(rl_prompt());
+        mc_fill_rewards(); gae_values(); gae_advantages();
+        val_zero_grads(); critic_backward(f64_from(1));
+        t_scale(G_wv, g_D, invT); t_scale(G_bv, 1, invT);
+        MC_b1t = f64_mul(MC_b1t, ADAM_B1()); MC_b2t = f64_mul(MC_b2t, ADAM_B2());
+        adam_kernel(P_wv, G_wv, M_wv, V_wv, g_D, lr, MC_b1t, MC_b2t);
+        adam_kernel(P_bv, G_bv, M_bv, V_bv, 1, lr, MC_b1t, MC_b2t);
+        s = s + 1;
+    }
+    memo_end();
+    return 0;
+}
+
+# Set up the corridor task: a policy behavior-cloned for `bc_steps` batches, its critic
+# trained for `critic_steps` rollouts, the search buffers. Seed `seed`.
+fn mcts_setup_n(bc_steps, critic_steps, seed): i64 {
+    pol_init(MC_V(), MC_D(), MC_T(), MC_TRAP(), seed); ac_init();
+    g_datalen = 0;
+    var lr = f64_div(f64_from(5), f64_from(100));
+    mc_bc_train(bc_steps, 16, lr, 300, 200);
+    mc_critic_train(critic_steps, lr);
+    mcts_init();
+    return 0;
+}
+
+# the demo's setup: 200 behavior-cloning batches, 400 critic rollouts, seed 7
+fn mcts_setup(): i64 { return mcts_setup_n(200, 400, 7); }
+
+# ---- baselines ----------------------------------------------------------------------
+# policy greedy decode (argmax π): mean true return (T policy forwards per prompt)
+fn mc_pgreedy(nprompts, base_seed): i64 {
+    guard(nprompts >= 1, "mc_pgreedy: nprompts must be >= 1");
+    var prompts = mc_prompts(nprompts, base_seed);
+    var total = f64_from(0); var i = 0;
+    while (i < nprompts) {
+        var x = load64(prompts + i * 8); var t = 0;
+        while (t < g_T) {
+            store64(MS_st + t * 8, x);
+            var a = pol_argmax(x);
+            store64(MS_ac + t * 8, a); x = a; t = t + 1;
+        }
+        total = f64_add(total, mc_true_return(MS_st, MS_ac));
+        i = i + 1;
+    }
+    return f64_div(total, f64_from(nprompts));
+}
+
+# best-of-N: N samples of π per prompt, keep the highest r* return; mean true return
+# (T policy forwards + T evaluator calls per sample)
+fn mc_best_of_n(N, nprompts, base_seed): i64 {
+    guard((N >= 1) && (nprompts >= 1), "mc_best_of_n: N and nprompts must be >= 1");
+    var prompts = mc_prompts(nprompts, base_seed);
+    var total = f64_from(0); var i = 0;
+    while (i < nprompts) {
+        var p = load64(prompts + i * 8); rng_seed(base_seed + 100003 * (i + 1));
+        var best = f64_from(0); var k = 0;
+        while (k < N) {
+            cnt_rollout(p);
+            var sc = f64_from(0); var t = 0;
+            while (t < g_T) {
+                sc = f64_add(sc, mc_score(load64(R_states + t * 8), load64(R_actions + t * 8)));
+                t = t + 1;
+            }
+            if ((k == 0) || (f64_gt(sc, best) == 1)) { best = sc; }
+            k = k + 1;
+        }
+        total = f64_add(total, best);
+        i = i + 1;
+    }
+    return f64_div(total, f64_from(nprompts));
+}
+
+# ---- beam search, four ways ---------------------------------------------------------
+fn MC_BMAX(): i64 { return 512; }
+var EB_st = 0; var EB_ac = 0; var EB_sc = 0;      # beams: BMAX × T states / actions, scores
+var EN_st = 0; var EN_ac = 0; var EN_sc = 0;      # the next depth's beams
+var EC_sc = 0; var EC_key = 0; var EC_ix = 0;     # candidates: return so far, ranking key, order
+var EC_tmp = 0; var EC_par = 0; var EC_act = 0;   # merge scratch, parent beam, action
+
+# Stable merge sort of the indices ix[0..n) by key[ix] descending (ties keep their order)
+fn mc_sort_desc(ix, n, key, tmp): i64 {
+    var w = 1;
+    while (w < n) {
+        var lo = 0;
+        while (lo < n) {
+            var mid = lo + w; if (mid > n) { mid = n; }
+            var hi = lo + 2 * w; if (hi > n) { hi = n; }
+            var i = lo; var j = mid; var k = lo;
+            while (k < hi) {
+                var take_i = 0;
+                if (j >= hi) { take_i = 1; }
+                elif (i < mid) {
+                    var ki = load64(key + load64(ix + i * 8) * 8);
+                    var kj = load64(key + load64(ix + j * 8) * 8);
+                    if (f64_lt(kj, ki) == 1) { take_i = 1; } elif (f64_eq(kj, ki) == 1) { take_i = 1; }
+                }
+                if (take_i == 1) { store64(tmp + k * 8, load64(ix + i * 8)); i = i + 1; }
+                else { store64(tmp + k * 8, load64(ix + j * 8)); j = j + 1; }
+                k = k + 1;
+            }
+            lo = lo + 2 * w;
+        }
+        var c = 0; while (c < n) { store64(ix + c * 8, load64(tmp + c * 8)); c = c + 1; }
+        w = w * 2;
+    }
+    return 0;
+}
+
+# add candidate (beam m, action a, return-so-far s, ranking key k) at index nc
+fn mc_cand(nc, m, a, s, k): i64 {
+    store64(EC_sc + nc * 8, s); store64(EC_key + nc * 8, k);
+    store64(EC_par + nc * 8, m); store64(EC_act + nc * 8, a); store64(EC_ix + nc * 8, nc);
+    return nc + 1;
+}
+
+# Beam of width B from the prompt alone. mode 0: every child of every beam, ranked by
+# cumulative r* (myopic); 1: every child, ranked by cumulative r* + V(child) (one critic
+# forward per child); 2: K distinct children sampled from π (one policy forward per beam),
+# myopic; 3: K children from π ranked with V. The last step ranks by the return itself, and
+# the result is the best beam. Mean true return.
+fn mc_beam(B, K, mode, nprompts, base_seed): i64 {
+    guard((B >= 1) && (B <= MC_BMAX()), "mc_beam: B out of range (1..MC_BMAX)");
+    guard((K >= 1) && (K <= g_V), "mc_beam: K out of range (1..V)");
+    guard((mode >= 0) && (mode <= 3), "mc_beam: mode out of range (0..3)");
+    guard(nprompts >= 1, "mc_beam: nprompts must be >= 1");
+    guard((MI_T == g_T) && (MI_V == g_V), "mc_beam: call mcts_init() after pol_init()");
+    var prompts = mc_prompts(nprompts, base_seed);
+    var total = f64_from(0); var i = 0;
+    while (i < nprompts) {
+        rng_seed(base_seed + 100003 * (i + 1));
+        var nb = 1;
+        store64(EB_st, load64(prompts + i * 8)); store64(EB_sc, f64_from(0));
+        var d = 0;
+        while (d < g_T) {
+            var nc = 0; var m = 0;
+            while (m < nb) {
+                var x = load64(EB_st + (m * g_T + d) * 8);
+                var sm = load64(EB_sc + m * 8);
+                if (mode >= 2) {
+                    cnt_logits(x); pol_softmax();
+                    var got = 0; var tries = 0; var used = 0;
+                    while ((got < K) && (tries < 8 * K)) {
+                        var a2 = pol_sample(); tries = tries + 1;
+                        if (((used >> a2) & 1) == 0) {
+                            used = used | (1 << a2);
+                            var s2 = f64_add(sm, mc_score(x, a2));
+                            var k2 = s2;
+                            if (mode == 3) { k2 = f64_add(s2, mc_value(a2)); }
+                            nc = mc_cand(nc, m, a2, s2, k2); got = got + 1;
+                        }
+                    }
+                } else {
+                    var a = 0;
+                    while (a < g_V) {
+                        var s = f64_add(sm, mc_score(x, a));
+                        var key = s;
+                        if (mode == 1) { key = f64_add(s, mc_value(a)); }
+                        nc = mc_cand(nc, m, a, s, key);
+                        a = a + 1;
+                    }
+                }
+                m = m + 1;
+            }
+            if (d == g_T - 1) { t_copy(EC_key, EC_sc, nc); }      # the last step ranks by the return
+            mc_sort_desc(EC_ix, nc, EC_key, EC_tmp);
+            var keep = B; if (nc < keep) { keep = nc; }
+            var slot = 0;
+            while (slot < keep) {
+                var c = load64(EC_ix + slot * 8);
+                var par = load64(EC_par + c * 8); var act = load64(EC_act + c * 8);
+                var t2 = 0;
+                while (t2 <= d) {
+                    store64(EN_st + (slot * g_T + t2) * 8, load64(EB_st + (par * g_T + t2) * 8));
+                    t2 = t2 + 1;
+                }
+                t2 = 0;
+                while (t2 < d) {
+                    store64(EN_ac + (slot * g_T + t2) * 8, load64(EB_ac + (par * g_T + t2) * 8));
+                    t2 = t2 + 1;
+                }
+                store64(EN_ac + (slot * g_T + d) * 8, act);
+                if (d + 1 < g_T) { store64(EN_st + (slot * g_T + d + 1) * 8, act); }
+                store64(EN_sc + slot * 8, load64(EC_sc + c * 8));
+                slot = slot + 1;
+            }
+            var tmp = EB_st; EB_st = EN_st; EN_st = tmp;
+            tmp = EB_ac; EB_ac = EN_ac; EN_ac = tmp;
+            tmp = EB_sc; EB_sc = EN_sc; EN_sc = tmp;
+            nb = keep;
+            d = d + 1;
+        }
+        total = f64_add(total, mc_true_return(EB_st, EB_ac));
+        i = i + 1;
+    }
+    return f64_div(total, f64_from(nprompts));
+}
+
+# ---- MCTS (PUCT) --------------------------------------------------------------------
+fn MC_NMAX(): i64 { return 65536; }  # tree nodes per prompt
+var ND_tok = 0;     # the node's state token (the action that reached it; the root: the prompt)
+var ND_dep = 0;     # its depth: actions taken from the prompt
+var ND_N = 0;       # visits
+var ND_W = 0;       # f64: the sum of returns from its parent through it
+var ND_e = 0;       # f64: r* of the edge into it
+var ND_exp = 0;     # 1 once its priors are computed
+var ND_P = 0;       # NMAX × V: its priors π(·|tok)
+var ND_kid = 0;     # NMAX × V: the child via action a, or -1
+var MC_nn = 0;      # nodes in use
+var MC_path = 0;    # the current simulation's path (≤ T + 1 nodes)
+var MI_T = 0;       # the g_T mcts_init sized the buffers for
+var MI_V = 0;       # the g_V it sized them for
+
+# allocate the beam and tree buffers for the current dims (mcts_setup_n calls it)
+fn mcts_init(): i64 {
+    var n = MC_BMAX() * g_T;
+    EB_st = t_alloc(n); EB_ac = t_alloc(n); EB_sc = t_alloc(MC_BMAX());
+    EN_st = t_alloc(n); EN_ac = t_alloc(n); EN_sc = t_alloc(MC_BMAX());
+    var nc = MC_BMAX() * g_V;
+    EC_sc = t_alloc(nc); EC_key = t_alloc(nc); EC_ix = t_alloc(nc); EC_tmp = t_alloc(nc);
+    EC_par = t_alloc(nc); EC_act = t_alloc(nc);
+    ND_tok = t_alloc(MC_NMAX()); ND_dep = t_alloc(MC_NMAX()); ND_N = t_alloc(MC_NMAX());
+    ND_W = t_alloc(MC_NMAX()); ND_e = t_alloc(MC_NMAX()); ND_exp = t_alloc(MC_NMAX());
+    ND_P = t_alloc(MC_NMAX() * g_V); ND_kid = t_alloc(MC_NMAX() * g_V);
+    MC_path = t_alloc(g_T + 2);
+    MS_st = t_alloc(g_T); MS_ac = t_alloc(g_T);
+    MI_T = g_T; MI_V = g_V;
+    return 0;
+}
+
+# a new tree node: token tok at depth dep, reached through an edge worth e
+fn mc_node(tok, dep, e): i64 {
+    guard(MC_nn < MC_NMAX(), "mcts: tree node cap (MC_NMAX) reached");
+    var n = MC_nn;
+    store64(ND_tok + n * 8, tok); store64(ND_dep + n * 8, dep);
+    store64(ND_N + n * 8, 0); store64(ND_W + n * 8, f64_from(0)); store64(ND_e + n * 8, e);
+    store64(ND_exp + n * 8, 0);
+    var a = 0; while (a < g_V) { store64(ND_kid + (n * g_V + a) * 8, 0 - 1); a = a + 1; }
+    MC_nn = MC_nn + 1;
+    return n;
+}
+
+# the PUCT choice at expanded node n with exploration weight c: argmax over actions of
+# Q/MC_QSCALE + c·P·√N(n)/(1 + N(child)), an unvisited child counting Q = 0
+fn mc_puct_pick(n, c): i64 {
+    var sqN = f64_sqrt(f64_from(load64(ND_N + n * 8)));
+    var best = 0 - 1; var bv = f64_from(0); var a = 0;
+    while (a < g_V) {
+        var k = load64(ND_kid + (n * g_V + a) * 8);
+        var q = f64_from(0); var nk = 0;
+        if (k >= 0) {
+            nk = load64(ND_N + k * 8);
+            if (nk > 0) { q = f64_div(f64_div(load64(ND_W + k * 8), f64_from(nk)), MC_QSCALE()); }
+        }
+        var pr = f64_mul(c, f64_mul(load64(ND_P + (n * g_V + a) * 8), sqN));
+        var u = f64_add(q, f64_div(pr, f64_from(1 + nk)));
+        if ((best < 0) || (f64_gt(u, bv) == 1)) { best = a; bv = u; }
+        a = a + 1;
+    }
+    return best;
+}
+
+# One simulation from root: descend by PUCT (creating a child on its first selection, its
+# edge scored by one evaluator call) to an unexpanded node; expand it with π's priors (one
+# policy forward) and value it with V scaled to the steps left (one critic forward); back
+# the return (the path's edges + that value) up as a mean.
+fn mc_simulate(root, c): i64 {
+    store64(MC_path, root); var plen = 1;
+    var n = root; var leafv = f64_from(0);
+    while (1 == 1) {
+        var dep = load64(ND_dep + n * 8);
+        if (dep >= g_T) { break; }                               # a full sequence: nothing after
+        if (load64(ND_exp + n * 8) == 0) {
+            var tok = load64(ND_tok + n * 8);
+            cnt_logits(tok); pol_softmax();
+            t_copy(ND_P + n * g_V * 8, S_probs, g_V);
+            store64(ND_exp + n * 8, 1);
+            if (n != root) {
+                leafv = f64_mul(mc_value(tok), f64_div(f64_from(g_T - dep), f64_from(g_T)));
+            }
+            break;
+        }
+        var a = mc_puct_pick(n, c);
+        var ch = load64(ND_kid + (n * g_V + a) * 8);
+        if (ch < 0) {
+            ch = mc_node(a, dep + 1, mc_score(load64(ND_tok + n * 8), a));
+            store64(ND_kid + (n * g_V + a) * 8, ch);
+        }
+        n = ch;
+        store64(MC_path + plen * 8, n); plen = plen + 1;
+    }
+    var G = leafv; var i = plen - 1;
+    while (i >= 1) {
+        var nd = load64(MC_path + i * 8);
+        G = f64_add(G, load64(ND_e + nd * 8));
+        store64(ND_N + nd * 8, load64(ND_N + nd * 8) + 1);
+        store64(ND_W + nd * 8, f64_add(load64(ND_W + nd * 8), G));
+        i = i - 1;
+    }
+    store64(ND_N + root * 8, load64(ND_N + root * 8) + 1);
+    return 0;
+}
+
+# the most-visited child of node n (ties: the higher mean return), or -1 if it has none
+fn mc_commit_child(n): i64 {
+    var best = 0 - 1; var bn = 0 - 1; var bq = f64_from(0); var a = 0;
+    while (a < g_V) {
+        var k = load64(ND_kid + (n * g_V + a) * 8);
+        if (k >= 0) {
+            var nk = load64(ND_N + k * 8);
+            var q = f64_from(0); if (nk > 0) { q = f64_div(load64(ND_W + k * 8), f64_from(nk)); }
+            if ((nk > bn) || ((nk == bn) && (f64_gt(q, bq) == 1))) { best = k; bn = nk; bq = q; }
+        }
+        a = a + 1;
+    }
+    return best;
+}
+
+# MCTS: for each of the T steps, S PUCT simulations (exploration weight c) from the
+# committed node, then commit its most-visited child and keep that subtree. Mean true return.
+fn mc_mcts(S, c, nprompts, base_seed): i64 {
+    guard((S >= 2) && (S * g_T < MC_NMAX()), "mc_mcts: S out of range (2 .. MC_NMAX / T)");
+    guard(nprompts >= 1, "mc_mcts: nprompts must be >= 1");
+    guard((MI_T == g_T) && (MI_V == g_V), "mc_mcts: call mcts_init() after pol_init()");
+    var prompts = mc_prompts(nprompts, base_seed);
+    var total = f64_from(0); var i = 0;
+    while (i < nprompts) {
+        rng_seed(base_seed + 100003 * (i + 1));
+        MC_nn = 0;
+        var root = mc_node(load64(prompts + i * 8), 0, f64_from(0));
+        var d = 0;
+        while (d < g_T) {
+            var s = 0; while (s < S) { mc_simulate(root, c); s = s + 1; }
+            var best = mc_commit_child(root);
+            store64(MS_st + d * 8, load64(ND_tok + root * 8));
+            store64(MS_ac + d * 8, load64(ND_tok + best * 8));
+            root = best;
+            d = d + 1;
+        }
+        total = f64_add(total, mc_true_return(MS_st, MS_ac));
+        i = i + 1;
+    }
+    return f64_div(total, f64_from(nprompts));
+}

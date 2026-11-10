@@ -5,6 +5,15 @@
 
 ## Version
 
+**1.4.0** — 2026-11-09. **The 1.4.x line: MCTS on a task that warrants it, gated honestly**
+([ADR 0003](../adr/0003-prior-guided-mcts.md)). `src/mcts.cyr`: the corridor (three zero-reward
+keys before a delayed payoff, a TRAP, a 60-point out-of-order penalty), a behavior-cloned prior,
+a policy-evaluation critic, PUCT with subtree reuse, and greedy / best-of-N / four beams given the
+same networks. MCTS S512 **54.00 @1,084** forwards per prompt (optimum 54.00) against best-of-64
+36.37 and the myopic beam 24.19 — and a prior + value beam **53.42 @543**; the demo prints both
+and gates both. Additive: no signature changed, no golden case moved. Demo 706 ms → ≈ 1.3 s (the
+new section). Assertions 234 → **266**, abort probes 18, benchmarks 17, 36-mutant run all killed.
+
 **1.3.0** — 2026-11-09. **The 1.3.x line: training throughput and preference fidelity.** The
 policy's backward is aggregated per state inside tarka's training loops (one `linear_bwd` per
 touched state; [architecture note 002](../architecture/002-aggregated-backward.md)) — a labeled
@@ -200,6 +209,16 @@ parameter version (`memo_begin` / `memo_end`;
 [architecture note 001](../architecture/001-distribution-memo.md)). Bits unchanged
 ([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
 
+**Prior-guided MCTS — 1.4.0** ([ADR 0003](../adr/0003-prior-guided-mcts.md)):
+- `src/mcts.cyr` — the corridor task (K1 → K2 → K3 open a GOAL worth +4 per step; a TRAP pays +1;
+  an out-of-order entry costs 60; optimum by dynamic programming), a policy behavior-cloned from
+  noisy demonstrations, its critic by policy evaluation, **PUCT** (priors from π, the critic as
+  leaf value, subtree reuse, most-visited commit) and four beams on the same networks.
+- Matched compute (forwards per prompt, 40 prompts): greedy 25.19 @16, best-of-64 36.37 @2,048,
+  myopic beam 24.19 @2,844, prior beam 27.89 @1,118, **MCTS 54.00 @1,084**, **prior + value beam
+  53.42 @543**. The learned value's lookahead solves it; on a deterministic task a value-ranked
+  beam gets it at less compute, and the gate says so.
+
 **Verifier-guided reasoning — complete (deliberation 0.5.0, tree search 0.7.0):**
 - `src/reasoning.cyr` — inference-time deliberation on the trained policy + reward-model verifier
   (no extra training). Reasoning task = checkable answer over a parity chain; policy made
@@ -222,7 +241,7 @@ parameter version (`memo_begin` / `memo_end`;
 
 ## Tests
 
-**234 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
+**266 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
 - `tests/tarka.tcyr` — **grad-check suite, 59** (M1: 4; M2: +15 — critic dW/db/dE
   FD-exact; GAE recursion==explicit + return identity; PPO ρ=1==REINFORCE / unclipped FD
   3e-9 / binding-clip→0; GRPO group-norm anchors + ratio=1==REINFORCE; M3: +5 — RM
@@ -232,13 +251,15 @@ parameter version (`memo_begin` / `memo_end`;
   bytes tokenize, raw-vocab refusal, the full escape set, strict labels, field types and line
   structure, identical spans, the row cap and skip counts, KTO class sizes; 1.3.0: +29 — option
   parsers, early stop, each side at its own length).
-- `tests/units.tcyr` — **44** (1.2.2: 38 — the memo's invalidation rules, parity / reasoning /
+- `tests/units.tcyr` — **75** (1.2.2: 38 — the memo's invalidation rules, parity / reasoning /
   search helpers, beam(1,1) == best-of-1, GAE normalization, GRPO's equal group, buffer
-  re-sizing; 1.3.0: +6 — the aggregated gradient against the per-token one, discard).
-- `tests/golden.tcyr` — **14** (1.2.2): FNV-1a digests of every trainer's bits, per target.
-- `tests/abort/` — 14 guard probes (each must exit 1 with the guard's message; run by CI).
+  re-sizing; 1.3.0: +6 — the aggregated gradient against the per-token one, discard; 1.4.0: +31 —
+  the corridor's reward and oracle, the stable sort, the tree's visit books).
+- `tests/golden.tcyr` — **15** (1.2.2; 1.4.0: + `mcts`): FNV-1a digests of every trainer's bits,
+  per target.
+- `tests/abort/` — 18 guard probes (each must exit 1 with the guard's message; run by CI).
 - `tests/tarka.fcyr` — seeded `--pref` fuzz harness, 5 properties × 4,000 rounds (~1.2 s).
-- `tests/tarka.bcyr` — 15 benchmarks; `scripts/bench-history.sh` → `bench-history.csv`.
+- `tests/tarka.bcyr` — 17 benchmarks; `scripts/bench-history.sh` → `bench-history.csv`.
 - Reference coverage (`cyrius coverage`): 132 / 208 functions; the demo, run by CI, exercises the rest.
 
 Grad-check discipline (every hand-derived backward verified against central finite
@@ -266,6 +287,7 @@ is the eventual downstream.)
 
 ## Next
 
-1.4.x: MCTS on a task that warrants it; then a GPU backend (1.5.x). Unscheduled: an aggregated
-backward for the reward model, a `PMIN` floor for `f64_ln`. The 2.0.0 backlog holds the changes
+1.5.x: a GPU backend through rosnet's GPU bundle. Unscheduled: MCTS on a stochastic or
+adversarial task (where the tree, not only the value, should matter), an aggregated backward for
+the reward model, a `PMIN` floor for `f64_ln`. The 2.0.0 backlog holds the changes
 that would break the frozen 1.x API. See [`roadmap.md`](roadmap.md).

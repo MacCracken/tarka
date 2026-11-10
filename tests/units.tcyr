@@ -15,6 +15,7 @@ include "src/preference_ext.cyr"
 include "src/preference.cyr"
 include "src/reasoning.cyr"
 include "src/search.cyr"
+include "src/mcts.cyr"
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -265,6 +266,77 @@ fn test_aggregated_backward(): i64 {
     return 0;
 }
 
+# ---- MCTS (1.4.0): the corridor's reward and optimum, the demonstrator, the tree's books --
+fn test_mc_reward(): i64 {
+    pol_init(MC_V(), MC_D(), MC_T(), MC_TRAP(), 41); g_datalen = 0;
+    assert_eq(mc_true_r(7, MC_TRAP()), f64_from(1), "TRAP: +1 from anywhere");
+    assert_eq(mc_true_r(7, MC_K1()), f64_from(0), "K1: 0 from anywhere");
+    assert_eq(mc_true_r(MC_K1(), MC_K2()), f64_from(0), "K2 after K1: 0");
+    assert_eq(mc_true_r(7, MC_K2()), MC_PEN(), "K2 out of order: the penalty");
+    assert_eq(mc_true_r(MC_K2(), MC_K3()), f64_from(0), "K3 after K2: 0");
+    assert_eq(mc_true_r(MC_K1(), MC_K3()), MC_PEN(), "K3 out of order: the penalty");
+    assert_eq(mc_true_r(MC_K3(), MC_GOAL()), f64_from(4), "GOAL after K3: +4");
+    assert_eq(mc_true_r(MC_GOAL(), MC_GOAL()), f64_from(4), "GOAL after GOAL: +4");
+    assert_eq(mc_true_r(MC_TRAP(), MC_GOAL()), MC_PEN(), "GOAL out of order: the penalty");
+    assert_eq(mc_true_r(7, 9), f64_from(0), "a neutral token: 0");
+    return 0;
+}
+
+fn test_mc_oracle(): i64 {
+    pol_init(MC_V(), MC_D(), MC_T(), MC_TRAP(), 42); g_datalen = 0;
+    assert_eq(mc_oracle_from(0), f64_from(52), "optimum from a neutral prompt: K1 K2 K3 GOAL x13 = 52");
+    assert_eq(mc_oracle_from(MC_TRAP()), f64_from(52), "from TRAP: 52");
+    assert_eq(mc_oracle_from(MC_K1()), f64_from(56), "from K1: 56");
+    assert_eq(mc_oracle_from(MC_K2()), f64_from(60), "from K2: 60");
+    assert_eq(mc_oracle_from(MC_K3()), f64_from(64), "from K3: 64");
+    assert_eq(mc_oracle_from(MC_GOAL()), f64_from(64), "from GOAL: 64");
+    mc_demo(0, 1, 0);                               # a solver demonstration without noise
+    assert_eq(load64(R_actions), MC_K1(), "the solver opens with K1");
+    assert_eq(load64(R_actions + 8), MC_K2(), "then K2");
+    assert_eq(load64(R_actions + 16), MC_K3(), "then K3");
+    assert_eq(load64(R_actions + 24), MC_GOAL(), "then GOAL");
+    assert_eq(mc_true_return(R_states, R_actions), f64_from(52), "and earns the optimum");
+    mc_demo(0, 0, 0);
+    assert_eq(mc_true_return(R_states, R_actions), f64_from(16), "a TRAP demonstration earns 16");
+    return 0;
+}
+
+fn test_mc_sort(): i64 {
+    var key = t_alloc(6); var ix = t_alloc(6); var tmp = t_alloc(6);
+    store64(key, f64_from(2)); store64(key + 8, f64_from(5)); store64(key + 16, f64_from(2));
+    store64(key + 24, f64_from(9)); store64(key + 32, f64_from(5)); store64(key + 40, f64_from(0 - 1));
+    var i = 0; while (i < 6) { store64(ix + i * 8, i); i = i + 1; }
+    mc_sort_desc(ix, 6, key, tmp);
+    assert_eq(load64(ix), 3, "sort: 9 first");
+    assert_eq(load64(ix + 8), 1, "then the first 5");
+    assert_eq(load64(ix + 16), 4, "then the second 5 (stable)");
+    assert_eq(load64(ix + 24), 0, "then the first 2");
+    assert_eq(load64(ix + 32), 2, "then the second 2 (stable)");
+    assert_eq(load64(ix + 40), 5, "then -1");
+    return 0;
+}
+
+fn test_mc_tree_books(): i64 {
+    mcts_setup_n(20, 20, 43);
+    MC_nn = 0;
+    var root = mc_node(0, 0, f64_from(0));
+    var S = 40; var s = 0;
+    while (s < S) { mc_simulate(root, f64_from(1)); s = s + 1; }
+    assert_eq(load64(ND_N + root * 8), S, "every simulation visits the root");
+    var sum = 0; var a = 0; var most = 0 - 1; var mostn = 0 - 1;
+    while (a < g_V) {
+        var k = load64(ND_kid + (root * g_V + a) * 8);
+        if (k >= 0) {
+            var nk = load64(ND_N + k * 8); sum = sum + nk;
+            if (nk > mostn) { mostn = nk; most = k; }
+        }
+        a = a + 1;
+    }
+    assert_eq(sum, S - 1, "the root's children share every visit but the expanding one");
+    assert_eq(load64(ND_N + mc_commit_child(root) * 8), mostn, "the committed child is the most visited");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_memo_hit_equals_compute();
@@ -280,6 +352,10 @@ fn main(): i64 {
     test_grpo_equal_group();
     test_buffers_resize();
     test_aggregated_backward();
+    test_mc_reward();
+    test_mc_oracle();
+    test_mc_sort();
+    test_mc_tree_books();
     return assert_summary();
 }
 

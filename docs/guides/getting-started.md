@@ -13,8 +13,8 @@ cyrius test                              # run [build].test + tests/*.tcyr
 - `src/main.cyr` — entry point + the demo (runs every milestone, prints the acceptance gates) and the CLI.
 - `src/test.cyr` — top-level test entry referenced by `cyrius.cyml [build].test` (a stub).
 - `tests/tarka.tcyr` — the finite-difference grad-check suite (59).
-- `tests/pref_ingest.tcyr` — `--pref` ingestion (117); `tests/units.tcyr` — the memo's and the aggregated backward's rules, the task helpers (44).
-- `tests/golden.tcyr` — the bit-for-bit gate: 14 digests per target ([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
+- `tests/pref_ingest.tcyr` — `--pref` ingestion (117); `tests/units.tcyr` — the memo's and the aggregated backward's rules, the task helpers, the corridor and the tree's books (75).
+- `tests/golden.tcyr` — the bit-for-bit gate: 15 digests per target ([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
 - `tests/abort/*.cyr` — guard probes (each must exit 1); `tests/fixtures/` — the `--pref` fixture.
 - `tests/tarka.bcyr` / `tests/tarka.fcyr` — benchmarks / the seeded `--pref` fuzz harness.
 
@@ -29,6 +29,7 @@ cyrius test                              # run [build].test + tests/*.tcyr
 | `src/preference.cyr` | preference-trained reward (ORM/PRM) + the process-vs-outcome transmission demo |
 | `src/reasoning.cyr` | inference-time deliberation: self-consistency + verifier best-of-N |
 | `src/search.cyr` | PRM-guided beam search (the genuine-search task) + matched-compute harness |
+| `src/mcts.cyr` | prior-guided MCTS (PUCT) on the corridor task, against beams given the same prior + value |
 | `src/dpo.cyr` | the frozen reference policy, DPO, the RLHF KL-to-reference penalty |
 | `src/preference_ext.cyr` | IPO (margin-regularized) and KTO (unpaired) on the same reference |
 | `src/report.cyr` | the printers shared by the demo and the `--pref` driver |

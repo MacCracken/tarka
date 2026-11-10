@@ -21,6 +21,7 @@ include "src/preference_ext.cyr"
 include "src/preference.cyr"
 include "src/reasoning.cyr"
 include "src/search.cyr"
+include "src/mcts.cyr"
 include "src/report.cyr"
 include "src/pref_ingest.cyr"
 
@@ -146,6 +147,22 @@ fn bench_beam(): i64 {
     return 0;
 }
 
+# prior-guided MCTS and the prior + value beam on the corridor, per prompt
+fn bench_mcts(): i64 {
+    mcts_setup();
+    var b = bench_new("MCTS PUCT S512 (per prompt, corridor)");
+    bench_batch_start(b);
+    mc_mcts(512, f64_from(1), 10, 2000);
+    bench_batch_stop(b, 10);
+    bench_report(b);
+    var b2 = bench_new("beam prior+value B4 K4 (per prompt, corridor)");
+    bench_batch_start(b2);
+    mc_beam(4, 4, 3, 10, 2000);
+    bench_batch_stop(b2, 10);
+    bench_report(b2);
+    return 0;
+}
+
 # pref ingestion: parse throughput over a generated ~1 MB JSONL (pairs + thumbs)
 fn bench_pref_parse(): i64 {
     var cap = PI_FMAX();
@@ -190,6 +207,7 @@ fn main(): i64 {
     bench_dpo_step();
     bench_kto_step();
     bench_beam();
+    bench_mcts();
     bench_pref_parse();
     return 0;
 }

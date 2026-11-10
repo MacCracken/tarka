@@ -9,7 +9,8 @@
 # CHANGELOG. 1.2.2 re-recorded two: "ipo metric" (ipo_mean_h skips ties) and "pref ingest"
 # (the vocab covers decoded field bytes; skip reasons are counted). 1.3.0 re-recorded "pref
 # ingest" (two-length pairs), then every case but "search" (the per-state aggregated backward
-# reorders the policy gradient's sums; search trains only the reward model). Parameter digests and
+# reorders the policy gradient's sums; search trains only the reward model). 1.4.0 added "mcts"
+# and moved no other case. Parameter digests and
 # metric digests are kept apart so a metric-only fix (e.g. a corrected average) cannot hide
 # a training change.
 
@@ -25,6 +26,7 @@ include "src/preference_ext.cyr"
 include "src/preference.cyr"
 include "src/reasoning.cyr"
 include "src/search.cyr"
+include "src/mcts.cyr"
 include "src/report.cyr"
 include "src/pref_ingest.cyr"
 
@@ -173,6 +175,20 @@ fn case_corpus(): i64 {
     g_datalen = 0;
     return g_h;
 }
+# prior-guided MCTS and the beams on the corridor, at a reduced size
+fn case_mcts(): i64 {
+    mcts_setup_n(40, 80, 7);
+    gh_reset();
+    gh_word(mc_oracle(6, 2000));
+    g_fwd = 0; gh_word(mc_pgreedy(6, 2000)); gh_word(g_fwd);
+    g_fwd = 0; gh_word(mc_best_of_n(8, 6, 2000)); gh_word(g_fwd);
+    var mode = 0;
+    while (mode < 4) { g_fwd = 0; gh_word(mc_beam(4, 4, mode, 6, 2000)); gh_word(g_fwd); mode = mode + 1; }
+    g_fwd = 0; gh_word(mc_mcts(64, f64_from(1), 6, 2000)); gh_word(g_fwd);
+    gh_policy(); gh_critic();
+    return g_h;
+}
+
 # the --pref path, step for step as tarka_pref_ingest drives it, at a reduced epoch count
 fn case_pref(): i64 {
     var buf = alloc(PI_FMAX() + 1);
@@ -233,6 +249,7 @@ fn main(): i64 {
     check("ipo metric", case_ipo_metric(), 0x7608c2fa05f72eed, 0x7608adfa05f70b3e);
     check("kto", case_kto(), 0x7842b1b30885e058, 0x5cde51b5d0e48db1);
     check("corpus reinforce", case_corpus(), 0xe3e9df5346490389, 0x49dabcd2a1a09b2b);
+    check("mcts", case_mcts(), 0x55524cb2abddbc6d, 0x94eb754bdb1111e3);
     check("pref ingest", case_pref(), 0xfea56cab63ff976b, 0xbce9385d4c0eadcc);
     return assert_summary();
 }

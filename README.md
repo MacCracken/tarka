@@ -30,8 +30,9 @@ the *methods* are the point):
   [ifran](https://github.com/MacCracken/ifran) `pref export` (curated human
   preferences in, aligned policy out — the control-plane loop closed).
 - **Reasoning** — inference-time deliberation: **self-consistency** (sample-and-vote),
-  **verifier best-of-N**, and **PRM-guided beam search** that steers generation to a
-  verifier objective greedy and best-of-N cannot reach.
+  **verifier best-of-N**, **PRM-guided beam search** that steers generation to a
+  verifier objective greedy and best-of-N cannot reach, and **prior-guided MCTS** (PUCT with a
+  learned prior and value), gated honestly against a beam given the same networks.
 
 Every hand-derived backward is finite-difference grad-checked (**59**), each method is
 held to a falsifiable **acceptance gate** — see [`docs/benchmarks.md`](docs/benchmarks.md) —
@@ -48,6 +49,7 @@ input path) and [0.8.0](docs/audit/2026-06-22-audit.md).
 | self-consistency (answer accuracy, votes 1→64) | 627 → **930** ‰ |
 | verifier best-of-N (true reward, N=16) | **892** vs 530 mean ≈ oracle 894 |
 | PRM-guided beam vs best-of-N vs greedy (matched compute) | **13.50** vs 4.05 vs 0.20 of 16 |
+| prior-guided MCTS vs myopic beam / best-of-64 (delayed payoff, optimum 54) | **54.00** vs 24.19 / 36.37 — and a prior + value beam 53.42 at half the compute |
 | DPO from preferences alone / KL penalty | target 0.94 → **24.00** / KL 3.33 → 2.46 |
 | IPO margin / KTO log-ratios | h 0.00 → **0.85** (target 1.00) / ρ +80.31 vs −138.27 |
 
@@ -81,7 +83,7 @@ cyrius build src/main.cyr build/tarka    # compile to a static ELF
 cyrius test                              # grad-checks, ingestion, units, the golden gate
 ```
 
-The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 0.7 s). `--pref`
+The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 1.3 s). `--pref`
 refuses files over 1 MB and prints why each refused row was refused.
 
 ## License

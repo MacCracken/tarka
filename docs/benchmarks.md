@@ -16,8 +16,8 @@ verified against central differences before any of these numbers are trusted —
 `tests/golden.tcyr`, which holds every trainer's result to the bit
 ([ADR 0002](adr/0002-optimizations-preserve-bits.md)).
 
-Measured on the dev host (cyrius 6.7.18, x86_64): full demo wall-clock **706 ms** (1.3.0;
-986 ms at 1.2.2, 3,495 ms at 1.2.1 — § 8). The numbers below are the same on aarch64 (qemu), and
+Measured on the dev host (cyrius 6.7.18, x86_64): full demo wall-clock **1.28 s** (1.4.0, with
+the § 9 MCTS section; 706 ms at 1.3.0, 986 ms at 1.2.2, 3,495 ms at 1.2.1 — § 8). The numbers below are the same on aarch64 (qemu), and
 1.3.0's reordered gradient sums (§ 8) left every one of them unchanged at the printed precision.
 
 ## 1. REINFORCE — the policy learns (count task)
@@ -135,29 +135,62 @@ each of the three optimizers stops after 10 epochs and the run takes 1.2 s, all 
 
 `scripts/bench-history.sh` runs `CYRIUS_DCE=1 cyrius bench tests/tarka.bcyr` three times and
 appends the medians to `bench-history.csv`. The rows below were recorded on the dev host (AMD
-Ryzen 7 5800H, x86_64) on 2026-11-09 — 1.2.1 and 1.2.2 in one session, 1.3.0 the same day:
+Ryzen 7 5800H, x86_64) on 2026-11-09 — 1.2.1 and 1.2.2 in one session, 1.3.0 and 1.4.0 the same day:
 
-| benchmark | 1.2.1 | 1.2.2 | 1.3.0 | |
-|-----------|------:|------:|------:|---|
-| forward V28 D8 | 904 ns | 894 ns | 935 ns | (kernel, uncached) |
-| forward V256 D64 | 11.57 µs | 12.83 µs | 13.05 µs | (kernel, uncached; run-to-run spread) |
-| rollout T24 V28 D8 | 23.06 µs | 24.17 µs | 24.70 µs | (outside a memo region) |
-| rl_backward T24 V28 D8 | 43.90 µs | 41.04 µs | 41.56 µs | (outside a region: per-token) |
-| rl_backward T24 V256 D64 | 856.3 µs | 794.1 µs | 850.6 µs | |
-| adam step V28 D8 | 8.77 µs | 9.02 µs | 9.32 µs | |
-| adam step V256 D64 | 595.8 µs | 603.6 µs | 635.0 µs | |
-| **REINFORCE step** (batch 16, T 24, V28 D8) | 1,072 µs | 368 µs | **156 µs** | 6.9× since 1.2.1 |
-| **PPO step** (4 epochs) | 285.4 µs | 171.3 µs | **130.2 µs** | 2.2× |
-| **GRPO step** (group 8) | 703.0 µs | 263.3 µs | **137.8 µs** | 5.1× |
-| PRM step (batch 16, V12 D8) | 26.7 µs | 24.2 µs | 23.9 µs | (the RM backward is per-token) |
-| **DPO step** (batch 16) | 2,692 µs | 649 µs | **332 µs** | 8.1× |
-| **KTO step** (batch 16) | 2,486 µs | 515 µs | **308 µs** | 8.1× |
-| beam search B8 K8 (per prompt) | 313.9 µs | 307.5 µs | 347.4 µs | (uncached, no policy backward; spread) |
-| pref_ingest_file, ~1 MB JSONL | 22.06 ms | 25.83 ms | 27.03 ms | the validating second pass (1.2.2) |
+| benchmark | 1.2.1 | 1.2.2 | 1.3.0 | 1.4.0 | |
+|-----------|------:|------:|------:|------:|---|
+| forward V28 D8 | 904 ns | 894 ns | 935 ns | 904 ns | (kernel, uncached) |
+| forward V256 D64 | 11.57 µs | 12.83 µs | 13.05 µs | 12.26 µs | (kernel, uncached; run-to-run spread) |
+| rollout T24 V28 D8 | 23.06 µs | 24.17 µs | 24.70 µs | 24.16 µs | (outside a memo region) |
+| rl_backward T24 V28 D8 | 43.90 µs | 41.04 µs | 41.56 µs | 39.40 µs | (outside a region: per-token) |
+| rl_backward T24 V256 D64 | 856.3 µs | 794.1 µs | 850.6 µs | 811.4 µs | |
+| adam step V28 D8 | 8.77 µs | 9.02 µs | 9.32 µs | 8.88 µs | |
+| adam step V256 D64 | 595.8 µs | 603.6 µs | 635.0 µs | 600.0 µs | |
+| **REINFORCE step** (batch 16, T 24, V28 D8) | 1,072 µs | 368 µs | **156 µs** | 154 µs | 6.9× since 1.2.1 |
+| **PPO step** (4 epochs) | 285.4 µs | 171.3 µs | **130.2 µs** | 124.0 µs | 2.2× |
+| **GRPO step** (group 8) | 703.0 µs | 263.3 µs | **137.8 µs** | 128.5 µs | 5.1× |
+| PRM step (batch 16, V12 D8) | 26.7 µs | 24.2 µs | 23.9 µs | 23.0 µs | (the RM backward is per-token) |
+| **DPO step** (batch 16) | 2,692 µs | 649 µs | **332 µs** | 309 µs | 8.1× |
+| **KTO step** (batch 16) | 2,486 µs | 515 µs | **308 µs** | 297 µs | 8.1× |
+| beam search B8 K8 (per prompt) | 313.9 µs | 307.5 µs | 347.4 µs | 327.1 µs | (uncached, no policy backward; spread) |
+| MCTS PUCT S512 (per prompt, corridor) | — | — | — | 13.69 ms | (1.4.0; § 9) |
+| beam prior + value B4 K4 (per prompt, corridor) | — | — | — | 101.1 µs | (1.4.0; § 9) |
+| pref_ingest_file, ~1 MB JSONL | 22.06 ms | 25.83 ms | 27.03 ms | 25.76 ms | the validating second pass (1.2.2) |
 
 1.2.2's gain is the distribution memo, 1.3.0's the aggregated backward. End to end: the demo
 3,495 → 986 → **706 ms** (median of three; 4.9× since 1.2.1); the review's 103 KB, V 92
-preference file 219 → 41 → **14.4 s**; the demo under qemu-aarch64 36 → 10 → **6 s**.
+preference file 219 → 41 → **14.4 s**; the demo under qemu-aarch64 36 → 10 → **6 s**. 1.4.0
+changes no kernel (its column is run-to-run spread) and adds the § 9 section, which takes the
+demo to ≈ 1.3 s (≈ 11 s under qemu).
+
+## 9. Prior-guided MCTS — and the beam given the same networks
+
+The corridor (`src/mcts.cyr`, [ADR 0003](adr/0003-prior-guided-mcts.md)): three zero-reward keys
+K1 → K2 → K3 open a GOAL worth +4 per step; a TRAP pays +1 per step; out-of-order entries cost 60.
+The evaluator is the exact reward. The prior is behavior-cloned from noisy demonstrations (30%
+solver, 70% TRAP, 20% of actions randomized); the value is its critic (policy evaluation). True
+return, mean of 40 prompts (prompt seed 2000; optimum 54.00, TRAP path 16.00), at the 0.7.0
+accounting (forwards per prompt):
+
+| method | prior seed 7 (the demo) | seed 11 | seed 13 |
+|--------|-------------------------|---------|---------|
+| policy greedy | 25.19 @16 | 25.19 @16 | 25.19 @16 |
+| best-of-64 | 36.37 @2048 | 32.22 @2048 | 34.00 @2048 |
+| beam, myopic (B 16, all children) | 24.19 @2844 | 24.19 @2844 | 24.19 @2844 |
+| beam, prior (B 16, K 4 from π) | 27.89 @1118 | 27.75 @1128 | 27.89 @1105 |
+| **MCTS, PUCT prior + value (S 512, c 1)** | **54.00 @1084** | **51.75 @1109** | **48.60 @1215** |
+| **beam, prior + value (B 4, K 4)** | **53.42 @543** | **53.47 @545** | **53.12 @540** |
+| beam, value (B 4, all children + V) | 13.19 @1464 | 54.00 @1464 | 54.00 @1464 |
+
+**Gate:** MCTS reaches 85% of the optimum (45.90) and beats greedy, best-of-64 and the two
+beams without lookahead at matched-or-higher compute for them ✅ — and the beam given the same
+prior and value also reaches 85%, at no more than MCTS's compute ✅. Lookahead from the learned
+value is what solves the corridor; on a deterministic task the tree adds nothing a value-ranked
+beam lacks. In wall time the beam is cheaper still: 0.10 ms per prompt against MCTS's 13.7 ms
+(the § 8 rows), because with cheap model calls PUCT's per-simulation bookkeeping dominates.
+The ADR records the three formulations measured before this one (a learned verifier blurred the
+corridor or was over-optimized; plain UCT could not expand it; on-policy PPO gave a prior
+captured by the TRAP).
 
 ## Performance notes
 

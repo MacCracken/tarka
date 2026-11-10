@@ -1,4 +1,4 @@
-# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2 + v1.2.2 + v1.3.0)
+# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2 + v1.2.2 + v1.3.0 + v1.4.0)
 
 > Satisfies the v1.0 criterion *"Public RL/reasoning API frozen — every exported symbol
 > documented and tested."*
@@ -57,7 +57,7 @@ precondition violated: …`; exit status 1).
 | `rl_eval(nroll)` → f64 | mean reward over `nroll` rollouts | demo, quickstart |
 | `rl_rollout(prompt)` / `rl_prompt()` → i64 / `rl_reward()` → f64 | sample a rollout / draw a prompt / score the current rollout | demo, suite |
 | `pol_logits(x)` / `pol_softmax()` / `pol_sample()` → i64 | per-step distribution / normalize / sample (custom decoding) | demo, suite |
-| `guard(cond, msg)` | fail-loud precondition guard (stdlib `panic`: `panic: tarka: precondition violated: <msg>`, exit 1) — the hardening primitive | demo, `tests/abort/` (14 probes) |
+| `guard(cond, msg)` | fail-loud precondition guard (stdlib `panic`: `panic: tarka: precondition violated: <msg>`, exit 1) — the hardening primitive | demo, `tests/abort/` (18 probes) |
 | `ADAM_B1()` `ADAM_B2()` `ADAM_EPS()` `RL_BETA()` | optimizer / baseline hyperparameters | suite |
 
 ## Actor-critic: PPO + GRPO — `src/actorcritic.cyr`
@@ -181,6 +181,32 @@ shaping, eval/train/fit loops, row accessors), `PI_PAIRB`, the `PR_*` parsed-row
 | `srch_beam(B, K, nprompts, base_seed)` → i64 | PRM-guided beam search; `1 ≤ B ≤ BMAX()`, `B*K ≤ BMAX()²` | demo |
 | `target_streak(st, ac)` → f64 | the metric (#TARGET in a rollout) | demo |
 | `TARGET()` `SR_V/D/T()` `BMAX()` / `g_fwd` | task config / max beam width / forward-pass counter | demo |
+
+## Prior-guided MCTS — `src/mcts.cyr` (added v1.4.0)
+
+PUCT with a behavior-cloned policy prior and a policy-evaluation critic, on the corridor task
+(a delayed payoff behind three zero-reward keys), against greedy, best-of-N and four beams given
+the same networks. The evaluator is the task's exact reward. See
+[ADR 0003](adr/0003-prior-guided-mcts.md) for the four formulations measured and why this one
+shipped; the honest result is that a beam given the same prior and value matches MCTS at less
+compute.
+
+| symbol | purpose | tested by |
+|--------|---------|-----------|
+| `mcts_setup()` / `mcts_setup_n(bc_steps, critic_steps, seed)` | the corridor task: a policy behavior-cloned from noisy demonstrations, its critic trained by policy evaluation, the search buffers (the demo's setup: 200, 400, seed 7) | demo, golden, units |
+| `mcts_init()` | allocate the beam and tree buffers for the current dims (`mcts_setup_n` calls it) | demo |
+| `mc_mcts(S, c, nprompts, base_seed)` → f64 | PUCT: S simulations per step (`2 ≤ S`, `S·T < MC_NMAX()`), exploration weight `c` (f64), subtree reuse, most-visited commit; mean true return | demo, golden, units |
+| `mc_beam(B, K, mode, nprompts, base_seed)` → f64 | beam of width `B ≤ MC_BMAX()`: mode 0 exhaustive myopic, 1 exhaustive + V, 2 `K` children from π, 3 `K` from π + V; mean true return | demo, golden |
+| `mc_best_of_n(N, nprompts, base_seed)` / `mc_pgreedy(nprompts, base_seed)` → f64 | best-of-N π samples by return / argmax-π decoding | demo, golden |
+| `mc_oracle(nprompts, base_seed)` / `mc_oracle_from(p)` → f64 | the true optimum (dynamic programming over r*) over the prompts / from one prompt | demo, units |
+| `mc_true_r(x, a)` / `mc_true_return(st, ac)` → f64 | the task's reward / the return of a stored sequence | units |
+| `mc_bc_train(steps, batch, lr, psol, eps)` / `mc_critic_train(steps, lr)` | behavior cloning (solver share and noise per mille) / policy evaluation of the frozen π | demo, golden |
+| `MC_V/D/T()` `MC_TRAP/K1/K2/K3/GOAL()` `MC_PEN()` `MC_QSCALE()` `MC_BMAX()` `MC_NMAX()` | task configuration, tokens, the out-of-order penalty, PUCT's Q scale, beam / tree caps | units |
+
+**Not frozen (internal mechanism):** `mc_score` / `mc_value` (the counted evaluator and critic
+calls), `mc_demo`, `mc_opt_action`, `mc_dp_table`, `mc_fill_rewards`, `mc_prompts`, `mc_sort_desc`,
+`mc_cand`, `mc_node`, `mc_puct_pick`, `mc_simulate`, `mc_commit_child`, and the `EB_*` / `EN_*` /
+`EC_*` / `ND_*` / `MC_*` tables.
 
 ## Report formatting — `src/report.cyr` (added v1.2.2)
 

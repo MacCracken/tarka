@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-09
+
+The 1.4.x roadmap line: Monte Carlo tree search on a task that warrants it, gated honestly
+([ADR 0003](docs/adr/0003-prior-guided-mcts.md)). Toolchain and dependencies unchanged (cyrius
+6.7.18; tyche 1.2.2, rosnet 1.4.1, akshara 1.1.2). Additive: no public signature changed, no
+existing golden case moved, and every number the demo printed at 1.3.0 is unchanged.
+
+### Added
+
+- **`src/mcts.cyr` — prior-guided MCTS (PUCT) on the corridor task.** Three zero-reward keys
+  K1 → K2 → K3, in order, open a GOAL worth +4 per step; a TRAP pays +1 per step; an out-of-order
+  entry costs 60. The optimum (dynamic programming over the true reward) is 54.00 over the
+  demo's 40 prompts; the TRAP path is 16. The pieces:
+  - a policy **behavior-cloned** from imperfect demonstrations (30% optimal, 70% TRAP, 20% of
+    actions randomized), and its **critic, trained by policy evaluation** (`mcts_setup_n`);
+  - **PUCT** (`mc_mcts`): priors from π, the critic as leaf value, subtree reuse, the
+    most-visited child committed;
+  - the baselines, given the same networks and counted on the 0.7.0 matched-compute harness:
+    policy greedy, best-of-N, and four beams (`mc_beam` — myopic exhaustive, exhaustive + V,
+    `K` children from π, `K` from π + V).
+- **The demo's MCTS section and gate.** MCTS (S 512) scores **54.00 @1,084** forwards per prompt,
+  against greedy 25.19, best-of-64 36.37 @2,048 and the myopic beam 24.19 @2,844. A beam given
+  the same prior and value scores **53.42 @543**. The gate asks what the measurements support:
+  MCTS reaches 85% of the optimum and beats the methods without lookahead at matched-or-higher
+  compute for them, *and* the prior + value beam also reaches 85% at no more than MCTS's compute.
+  On a deterministic task the learned value's lookahead is what solves the corridor, and the tree
+  adds nothing a value-ranked beam lacks; the demo prints both. ADR 0003 records the three
+  formulations measured before this one: a learned verifier that blurred the corridor or was
+  over-optimized, plain UCT that could not expand it, and a PPO prior captured by the TRAP.
+  `docs/benchmarks.md` § 9 reports three independently trained priors.
+- **Tests:**
+  - units +31: the reward, the oracle, the stable sort, and the tree's books (root N = S;
+    children's N sum to S − 1; the committed child is the most visited);
+  - a golden case `mcts`, recorded on both targets;
+  - four abort probes (a beam wider than `MC_BMAX`, fewer than 2 simulations, the search's
+    buffers stale after a `pol_init` that changed T, or V — `mcts_init` sizes them by both, and
+    the guard checks both);
+  - two benchmarks (MCTS S512 at 13.7 ms per prompt, the prior + value beam at 0.10 ms);
+  - eight mutants of the search, all killed.
+
+### Changed
+
+- The demo takes ≈ 1.3 s (706 ms at 1.3.0): the new section, not a slowdown of the old ones. Under
+  qemu-aarch64 it takes ≈ 11 s, with output identical to x86_64.
+
 ## [1.3.0] - 2026-11-09
 
 The 1.3.x roadmap line: training throughput and preference fidelity. Toolchain and dependencies

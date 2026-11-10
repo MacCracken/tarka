@@ -1,20 +1,13 @@
 # tarka — Roadmap
 
 > What ships next, by release line. Shipped work is in [`CHANGELOG.md`](../../CHANGELOG.md)
-> (0.1.0 → 1.3.0); live state is in [`state.md`](state.md).
+> (0.1.0 → 1.4.0); live state is in [`state.md`](state.md).
 >
 > **The 1.x rule.** A 1.x release may add symbols to the frozen API ([`docs/api.md`](../api.md))
 > and may move results as a *labeled behavior change* — it re-records the golden cases it
 > touches and names them in the CHANGELOG ([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
 > It may not change or remove a frozen signature. Anything that would is in the
 > [2.0.0 backlog](#200-backlog--breaks-the-frozen-1x-api).
-
-## 1.4.x — search
-
-- **MCTS on a task that warrants it.** 0.7.0 scoped it out: the search task is deterministic with
-  one good action per step, where beam search is the right tool. MCTS needs a task where value
-  backup matters — stochastic transitions, or several good actions with delayed payoff — and is
-  measured against beam on the existing matched-compute harness (`g_fwd`, uncached).
 
 ## 1.5.x — GPU backend
 
@@ -27,6 +20,13 @@
 ## 1.x.x — unscheduled
 
 Recorded so they are not lost; each waits for a caller that needs it.
+
+- **MCTS on a stochastic or adversarial task.** 1.4.0 shipped prior-guided PUCT on a
+  deterministic task, where a beam given the same prior and value matches it at less compute
+  ([ADR 0003](../adr/0003-prior-guided-mcts.md)). MCTS's own advantage — averaging over chance
+  outcomes, or an opponent's replies, where a beam keeps lucky branches — needs a task with
+  stochastic transitions or two players. Expert iteration (training π on MCTS's visit counts)
+  belongs with it.
 
 - **An aggregated backward for the reward model.** 1.3.0 aggregates the policy's backward per
   state ([architecture note 002](../architecture/002-aggregated-backward.md)); the reward model's

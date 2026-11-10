@@ -21,6 +21,7 @@ include "src/preference_ext.cyr"  # IPO (margin-regularized) + KTO (unpaired pro
 include "src/preference.cyr"  # reward-model transmission demo (learned reward -> RL -> true reward)
 include "src/reasoning.cyr"  # verifier-guided reasoning (self-consistency, best-of-N)
 include "src/search.cyr"     # PRM-guided tree (beam) search on a sequential task
+include "src/mcts.cyr"       # prior-guided MCTS (PUCT) vs beams with the same prior + value
 include "src/report.cyr"       # print_f2 / print_cd (shared with the --pref driver)
 include "src/pref_ingest.cyr"  # ifran pref-export JSONL ingestion (--pref): DPO/IPO/KTO from curated sets
 
@@ -37,6 +38,12 @@ fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
 fn read_stdin(buf, cap): i64 { return 0 - 1; }
 # akshara consumer hook, unused (see above)
 fn file_seek(fd, off): i64 { return 0 - 1; }
+
+# print one MCTS-demo row: the label, the true return, the forwards per prompt
+fn mc_row(label, v, f): i64 {
+    puts(label); print_f2(v); puts("   (fwd/prompt "); fmt_int(f); puts(")\n");
+    return 0;
+}
 
 # print the command-line usage
 fn usage(): i64 {
@@ -246,6 +253,44 @@ fn main(): i64 {
         puts("  search GATE PASS: PRM-guided beam >> best-of-N >> greedy at matched-or-lower compute\n");
     } else { puts("  search GATE FAIL\n"); }
 
+    # ---- reasoning (MCTS): prior-guided tree search where a step's worth shows later ----
+    # The corridor (src/mcts.cyr): K1 K2 K3 open GOAL (+4/step), TRAP pays +1/step, out-of-order
+    # entries cost 60. The evaluator is the exact reward; the prior is behavior-cloned from
+    # noisy demonstrations, the value is its critic. Every method uses the same networks.
+    puts("\n--- reasoning (MCTS): prior-guided tree search on a delayed-payoff task ---\n");
+    mcts_setup();
+    var mnp = 40; var mseed = 2000;
+    var m_or = mc_oracle(mnp, mseed);
+    g_fwd = 0; var m_gr = mc_pgreedy(mnp, mseed); var f_gr = g_fwd / mnp;
+    g_fwd = 0; var m_bon = mc_best_of_n(64, mnp, mseed); var f_bon = g_fwd / mnp;
+    g_fwd = 0; var m_bm = mc_beam(16, 1, 0, mnp, mseed); var f_bm = g_fwd / mnp;
+    g_fwd = 0; var m_bp = mc_beam(16, 4, 2, mnp, mseed); var f_bp = g_fwd / mnp;
+    g_fwd = 0; var m_mc = mc_mcts(512, f64_from(1), mnp, mseed); var f_mc = g_fwd / mnp;
+    g_fwd = 0; var m_bpv = mc_beam(4, 4, 3, mnp, mseed); var f_bpv = g_fwd / mnp;
+    puts("  true return, mean of "); fmt_int(mnp); puts(" prompts (optimum "); print_f2(m_or);
+    puts(", TRAP path 16.00):\n");
+    mc_row("  policy greedy:                     ", m_gr, f_gr);
+    mc_row("  best-of-64:                        ", m_bon, f_bon);
+    mc_row("  beam, myopic (B 16):               ", m_bm, f_bm);
+    mc_row("  beam, prior (B 16, K 4):           ", m_bp, f_bp);
+    mc_row("  MCTS, PUCT prior + value (S 512):  ", m_mc, f_mc);
+    mc_row("  beam, prior + value (B 4, K 4):    ", m_bpv, f_bpv);
+
+    # mcts gate: MCTS reaches 85% of the optimum and beats greedy, best-of-N and the two beams
+    # without lookahead at matched-or-higher compute for them — and (the honest half) a beam
+    # given the same prior + value also reaches 85%, at no more than MCTS's compute.
+    var m_floor = f64_mul(m_or, f64_div(f64_from(85), f64_from(100)));
+    var mcts_ok = 0;
+    if ((f64_gt(m_mc, m_floor) == 1) && (f64_gt(m_mc, m_gr) == 1)
+        && (f64_gt(m_mc, m_bon) == 1) && (f_bon >= f_mc)
+        && (f64_gt(m_mc, m_bm) == 1) && (f_bm >= f_mc)
+        && (f64_gt(m_mc, m_bp) == 1) && (f_bp >= f_mc)
+        && (f64_gt(m_bpv, m_floor) == 1) && (f_bpv <= f_mc)) {
+        mcts_ok = 1;
+        puts("  mcts GATE PASS: the learned value's lookahead solves it — MCTS beats greedy, best-of-N and the\n");
+        puts("    myopic beams at matched compute; a beam with the same prior + value matches it at less compute\n");
+    } else { puts("  mcts GATE FAIL\n"); }
+
     # ---- alignment: DPO (preferences only) + RLHF KL-to-reference-policy penalty ----
     # DPO aligns the policy from PREFERENCES ALONE — no reward model, no value critic, no
     # sampler-in-the-loop reward: each step prefers the higher-target-count rollout while the
@@ -315,7 +360,7 @@ fn main(): i64 {
         puts("KTO raises desirable ρ + lowers undesirable ρ\n");
     } else { puts("  preference-ext GATE FAIL\n"); }
 
-    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (align_ok == 1)
+    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (mcts_ok == 1) && (align_ok == 1)
         && (ext_ok == 1)) {
         puts("\n  ALL GATES PASS\n"); return 0;
     }
