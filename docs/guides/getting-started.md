@@ -13,8 +13,8 @@ cyrius test                              # run [build].test + tests/*.tcyr
 - `src/main.cyr` — entry point + the demo (runs every milestone, prints the acceptance gates) and the CLI.
 - `src/test.cyr` — top-level test entry referenced by `cyrius.cyml [build].test` (a stub).
 - `tests/tarka.tcyr` — the finite-difference grad-check suite (59).
-- `tests/pref_ingest.tcyr` — `--pref` ingestion (117); `tests/units.tcyr` — the memo's and the aggregated backward's rules, the task helpers, the corridor and the tree's books, the device path (92).
-- `tests/golden.tcyr` — the bit-for-bit gate: 15 digests per target, each checked on the CPU and again under `--gpu` ([ADR 0002](../adr/0002-optimizations-preserve-bits.md), [ADR 0004](../adr/0004-gpu-parity-backend.md)).
+- `tests/pref_ingest.tcyr` — `--pref` ingestion (117); `tests/units.tcyr` — the memo's and the aggregated backward's rules, the task helpers, the corridor and the tree's books, the device path, the casino corridor (118).
+- `tests/golden.tcyr` — the bit-for-bit gate: 16 digests per target, each checked on the CPU and again under `--gpu` ([ADR 0002](../adr/0002-optimizations-preserve-bits.md), [ADR 0004](../adr/0004-gpu-parity-backend.md)).
 - `tests/abort/*.cyr` — guard probes (each must exit 1); `tests/fixtures/` — the `--pref` fixture.
 - `tests/tarka.bcyr` / `tests/tarka.fcyr` — benchmarks / the seeded `--pref` fuzz harness.
 
@@ -30,6 +30,7 @@ cyrius test                              # run [build].test + tests/*.tcyr
 | `src/reasoning.cyr` | inference-time deliberation: self-consistency + verifier best-of-N |
 | `src/search.cyr` | PRM-guided beam search (the genuine-search task) + matched-compute harness |
 | `src/mcts.cyr` | prior-guided MCTS (PUCT) on the corridor task, against beams given the same prior + value |
+| `src/chance.cyr` | MCTS with chance nodes on the casino corridor, against sampled beams; expert iteration |
 | `src/dpo.cyr` | the frozen reference policy, DPO, the RLHF KL-to-reference penalty |
 | `src/preference_ext.cyr` | IPO (margin-regularized) and KTO (unpaired) on the same reference |
 | `src/report.cyr` | the printers shared by the demo and the `--pref` driver |

@@ -5,6 +5,25 @@
 
 ## Version
 
+**1.6.0** — 2026-11-09. **The 1.6.x line: MCTS where the tree matters**
+([ADR 0005](../adr/0005-mcts-under-chance.md)).
+- **The task.** `src/chance.cyr`, the casino corridor: 1.4.0's corridor plus GAMBLE, a shortcut that
+  pays off with probability 1/4 and otherwise costs 8, which loses in expectation. The planners get a
+  sampler only, and every method acts closed-loop on real outcomes they never see.
+- **The methods.** MCTS with chance nodes (PUCT over actions, a child per sampled outcome, subtree
+  reuse along the real outcome), closed-loop sampled beams and best-of-N, and expert iteration (the
+  root's visit counts distilled into π).
+- **Results** (seed 7, 40 episodes, optimum 54.89):
+  - MCTS S128 **52.79 @16.5k** against the beam B16 39.52 @14.8k, the 4-sample beam 47.29 @54k, and
+    best-of-64 39.45 @17.4k;
+  - with the same networks and the gamble made a certain bust, the beam recovers to **53.39**;
+  - expert iteration lifts greedy 32.10 → **49.50** at 16 forwards, and the distilled prior reaches
+    the optimum with MCTS S64.
+
+  All three gate claims hold for three priors. No signature changed, and no golden case moved.
+- **Tests.** Assertions 299 → **327**, abort probes 23, benchmarks 25, and 14 mutants of the
+  module, all killed.
+
 **1.5.0** — 2026-11-09. **The 1.5.x line: `--gpu`, a bit-exact parity backend**
 ([ADR 0004](../adr/0004-gpu-parity-backend.md)).
 - **What runs on the device.** A memo miss under `--gpu` fills the model's whole logits table
@@ -234,6 +253,21 @@ parameter version (`memo_begin` / `memo_end`;
 - It uses rosnet's bit-exact class only. `gpu_adam_step` rounds differently from tarka's Adam, and
   `gpu_linear_bwd` is tolerance-class, so both stay off.
 
+**MCTS under chance + expert iteration — 1.6.0** ([ADR 0005](../adr/0005-mcts-under-chance.md)):
+- `src/chance.cyr` — the casino corridor:
+  - **The task:** GAMBLE → JACKPOT, which opens GOAL, with probability 1/4, else BUST costing 8.
+    Its optimum in expectation is computed by dynamic programming. The real outcomes come from
+    their own splitmix64 stream, the same for every method.
+  - **The networks:** a prior behavior-cloned from optimal, gambling and TRAP demonstrations, and
+    its critic, trained by policy evaluation in the stochastic task.
+  - **The methods:** closed-loop greedy / best-of-N / beams (K children, M outcome samples per
+    child), MCTS with chance nodes (`ch_simulate`), and expert iteration (`ch_exit_collect`,
+    `ch_exit_train`: soft targets through `pol_seed_bwd`).
+- Matched compute (40 episodes): MCTS S128 52.79 @16.5k beats every beam and best-of-64, which
+  gamble 0.3–1.9 times per episode; MCTS never does.
+  - The ablation, the gamble made certain with the same networks, puts the beam back at 53.39.
+  - The distilled π: greedy 49.50 @16, beam 50.39, MCTS S64 54.89.
+
 **Prior-guided MCTS — 1.4.0** ([ADR 0003](../adr/0003-prior-guided-mcts.md)):
 - `src/mcts.cyr` — the corridor task (K1 → K2 → K3 open a GOAL worth +4 per step; a TRAP pays +1;
   an out-of-order entry costs 60; optimum by dynamic programming), a policy behavior-cloned from
@@ -266,7 +300,7 @@ parameter version (`memo_begin` / `memo_end`;
 
 ## Tests
 
-**299 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
+**327 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
 - `tests/tarka.tcyr` — **grad-check suite, 59** (M1: 4; M2: +15 — critic dW/db/dE
   FD-exact; GAE recursion==explicit + return identity; PPO ρ=1==REINFORCE / unclipped FD
   3e-9 / binding-clip→0; GRPO group-norm anchors + ratio=1==REINFORCE; M3: +5 — RM
@@ -276,16 +310,18 @@ parameter version (`memo_begin` / `memo_end`;
   bytes tokenize, raw-vocab refusal, the full escape set, strict labels, field types and line
   structure, identical spans, the row cap and skip counts, KTO class sizes; 1.3.0: +29 — option
   parsers, early stop, each side at its own length).
-- `tests/units.tcyr` — **92** (1.2.2: 38 — the memo's invalidation rules, parity / reasoning /
+- `tests/units.tcyr` — **118** (1.2.2: 38 — the memo's invalidation rules, parity / reasoning /
   search helpers, beam(1,1) == best-of-1, GAE normalization, GRPO's equal group, buffer
   re-sizing; 1.3.0: +6 — the aggregated gradient against the per-token one, discard; 1.4.0: +31 —
   the corridor's reward and oracle, the stable sort, the tree's visit books; 1.5.0: +17 — the device
-  table against linear_fwd at D 8 / 16 / 17, a decline, the --gpu-off path, memo equivalence).
-- `tests/golden.tcyr` — **31** (1.2.2; 1.4.0: + `mcts`; 1.5.0: every case again under `--gpu`, plus
-  the device check — used when present, every table declined when not): FNV-1a digests of every trainer's bits, per target.
-- `tests/abort/` — 18 guard probes (each must exit 1 with the guard's message; run by CI).
+  table against linear_fwd at D 8 / 16 / 17, a decline, the --gpu-off path, memo equivalence;
+  1.6.0: +26 — the casino corridor's reward, the real stream, the expectation optimum, the chance
+  tree's books, the expert-iteration records).
+- `tests/golden.tcyr` — **33** (1.2.2; 1.4.0: + `mcts`; 1.5.0: every case again under `--gpu`, plus
+  the device check — used when present, every table declined when not; 1.6.0: + `chance`): FNV-1a digests of every trainer's bits, per target.
+- `tests/abort/` — 23 guard probes (each must exit 1 with the guard's message; run by CI).
 - `tests/tarka.fcyr` — seeded `--pref` fuzz harness, 5 properties × 4,000 rounds (~1.2 s).
-- `tests/tarka.bcyr` — 22 benchmarks (the `--gpu` rows only with a device); `scripts/bench-history.sh` → `bench-history.csv`.
+- `tests/tarka.bcyr` — 25 benchmarks (the `--gpu` rows only with a device); `scripts/bench-history.sh` → `bench-history.csv`.
 - Reference coverage (`cyrius coverage`): 132 / 208 functions; the demo, run by CI, exercises the rest.
 
 Grad-check discipline (every hand-derived backward verified against central finite
@@ -316,7 +352,7 @@ is the eventual downstream.)
 
 ## Next
 
-1.6.x: MCTS on a stochastic or adversarial task, where the tree and not only the value should
-matter. Unscheduled: a GPU path that pays (a device or batched kernel; then `--gpu-tc`), an
-aggregated backward for the reward model, a `PMIN` floor for `f64_ln`. The 2.0.0 backlog holds the changes
+No release line is scheduled. Unscheduled: MCTS against an opponent (a two-player task, minimax
+backup), a GPU path that pays (a device or batched kernel; then `--gpu-tc`), an aggregated backward
+for the reward model, and a `PMIN` floor for `f64_ln`. The 2.0.0 backlog holds the changes
 that would break the frozen 1.x API. See [`roadmap.md`](roadmap.md).

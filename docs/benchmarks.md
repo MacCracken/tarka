@@ -16,8 +16,14 @@ verified against central differences before any of these numbers are trusted —
 `tests/golden.tcyr`, which holds every trainer's result to the bit
 ([ADR 0002](adr/0002-optimizations-preserve-bits.md)).
 
-Measured on the dev host (cyrius 6.7.18, x86_64): full demo wall-clock **1.28 s** (1.4.0, with
-the § 9 MCTS section; 706 ms at 1.3.0, 986 ms at 1.2.2, 3,495 ms at 1.2.1 — § 8). The numbers below are the same on aarch64 (qemu), and
+Measured on the dev host (cyrius 6.7.18, x86_64): full demo wall-clock **1.28 s** at 1.4.0, with
+the § 9 MCTS section (706 ms at 1.3.0, 986 ms at 1.2.2, 3,495 ms at 1.2.1 — § 8). 1.6.0's § 11
+section was measured only on a host loaded by other jobs. At a load average of about 12 it took
+2.4 s while the rest of the demo took 2.8 s (1.28 s on a quiet host). At a load of about 6.5 the
+whole 1.6.0 demo took 2.75 s (median of three). The numbers below are the same on aarch64
+(qemu), except one row of § 11. aarch64 fuses rosnet's multiply-add, so the networks'
+low-order bits differ there (the golden gate keeps a table per target), and the 4-sample beam's
+result moves to 47.75 @53,878. And
 1.3.0's reordered gradient sums (§ 8) left every one of them unchanged at the printed precision.
 
 ## 1. REINFORCE — the policy learns (count task)
@@ -223,7 +229,8 @@ loaded host (so the ratios are fair, though the absolute times are inflated):
 | REINFORCE step (batch 16, T 24, V28 D8) | 330.8 µs | 563.4 µs |
 
 **Gate: parity** ✅.
-- The demo under `--gpu` fills **6,321** tables on the device and declines **0**. Every line but
+- The demo under `--gpu` fills **6,321** tables on the device at 1.5.0 (**6,722** since 1.6.0's
+  § 11 section) and declines **0**. Every line but
   the `GPU: ` ones is the CPU run's.
 - The `--pref` fixture's run fills **915** tables, and is likewise the CPU's output.
 - `tests/golden.tcyr` re-runs all 15 cases under `--gpu` against the CPU's digests (1,202 tables on
@@ -233,6 +240,57 @@ loaded host (so the ratios are fair, though the absolute times are inflated):
   for.
 - Without a device (a CI runner, or aarch64 under qemu), every table is declined and computed on the
   CPU.
+
+## 11. MCTS under chance — and expert iteration
+
+The casino corridor (`src/chance.cyr`, [ADR 0005](adr/0005-mcts-under-chance.md)) is 1.4.0's
+corridor plus GAMBLE: a shortcut that pays off with probability 1/4 and otherwise costs 8, so it
+loses 7 in expectation from a neutral token.
+- **Planners** get a sampler only.
+- **Every method acts closed-loop**, on real outcomes from their own stream, the same for every
+  method.
+- **Scores** are the mean real return over 40 episodes (prompt seed 2000; the optimum in
+  expectation is 54.89). `@` is forwards per episode, and a simulator call counts as one.
+
+| method | prior seed 7 (the demo) | seed 11 | seed 13 |
+|--------|-------------------------|---------|---------|
+| policy greedy | 32.10 @16 | 30.80 @16 | 28.50 @16 |
+| best-of-64 | 39.45 @17408 | 44.47 @17408 | 42.10 @17408 |
+| beam B16 K4 | 39.52 @14775 | 45.60 @14485 | 46.95 @14698 |
+| beam B32 K4 | 37.22 @27007 | 46.42 @26538 | 44.42 @26860 |
+| beam B16 K4, 4 outcome samples | 47.29 @53873 | 47.89 @52833 | 49.95 @53616 |
+| MCTS, chance nodes, S 64 | 45.22 @7809 | 54.20 @8173 | 35.10 @7593 |
+| **MCTS, chance nodes, S 128** | **52.79 @16494** | **54.29 @16766** | **51.29 @16259** |
+| *gamble a certain bust, same networks:* beam B16 K4 | 53.39 @14791 | 53.62 @14555 | 52.82 @14737 |
+| *gamble a certain bust, same networks:* MCTS S 128 | 52.64 @16526 | 54.89 @16848 | 51.60 @16311 |
+
+Expert iteration distills the root's visit distributions into π:
+
+| after distilling | S 128 × 32 episodes (the demo) | S 256 × 64 episodes |
+|------------------|--------------------------------|---------------------|
+| policy greedy (seeds 7 / 11 / 13) | 49.50 / 43.79 / 40.50 @16 | 49.50 / 49.50 / 54.89 @16 |
+| beam B16 K4 (seed 7) | 50.39 @5842 | 52.57 @4354 |
+| MCTS S 64 (seeds 7 / 11 / 13) | 54.89 / 54.89 / 54.89 @≈8.6k | 54.89 / 54.89 / 54.89 @≈8.6k |
+| data collection | ≈ 0.53M forwards | ≈ 2.17M forwards |
+
+**Gate ✅, three claims** (all three hold for every prior above):
+- **MCTS reaches 90% of the optimum** (49.40). It beats best-of-64 and the averaged beam at
+  matched or higher compute, and it beats the plain beam.
+- **The cause is chance.** The plain beam is under 90% here, and over it with the gamble made a
+  certain bust.
+- **On aarch64** (qemu) every row is the same except the 4-sample beam, at 47.75 @53,878, because
+  of the fused multiply-add. The gate holds on both targets.
+- **Expert iteration pays.** The distilled π decodes greedily at least 10 points above the cloned
+  one, and as MCTS's prior at S 64 it matches or beats the cloned prior at S 128.
+
+**Why the beams lose:**
+- **They keep lucky branches.** The beams gamble 0.3–1.9 times per episode, and MCTS S 128 never
+  does. A beam ranks by sampled outcomes, so jackpot candidates rise (the optimizer's curse).
+- **Averaging is not enough.** Averaging four samples per child narrows the gap, but each beam
+  entry still carries one realized outcome forward.
+
+In wall time, on the loaded host, MCTS S 128 took 8.6 ms per episode against 6.2 ms for the beam,
+and one distillation epoch over 512 records took 0.68 ms (the bench rows).
 
 ## Performance notes
 

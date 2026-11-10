@@ -1,0 +1,659 @@
+# tarka — MCTS where the tree matters (1.6.0): PUCT with chance nodes on a task with a random
+# outcome, against beams given the same networks and the same sampler, and expert iteration
+# (training π on MCTS's visit counts). docs/adr/0005-mcts-under-chance.md.
+#
+# 1.4.0's corridor is deterministic, and a beam given the same prior and value matched MCTS
+# there (ADR 0003). This module adds one random action:
+#
+#   THE CASINO CORRIDOR. The corridor (K1 → K2 → K3 open GOAL, +4 per step; TRAP +1 per
+#   step; out-of-order entries cost 60) plus GAMBLE: with probability CH_Q per mille it lands
+#   on JACKPOT, which opens GOAL at once (a shortcut past the three keys), otherwise on BUST,
+#   costing CH_LOSS. JACKPOT and BUST are reached only through GAMBLE (entering either
+#   directly costs 60). In expectation gambling loses: from a neutral token, with 16 steps
+#   left, the corridor is worth 52 and a gamble 45 (q = 1/4, L = 8). A lucky sample of it is
+#   worth 60.
+#
+# The planners get a sampler only (ch_sim: one counted call, the planner's RNG), never the
+# outcome probabilities. Every method acts closed-loop, one action per real step, re-planning
+# from the state it is in. The real outcomes come from their own stream (ch_env_u: a hash of
+# the episode and the step), the same for every method (common random numbers) and never
+# seen by a planner. The networks:
+#   - the PRIOR π: behavior-cloned from imperfect demonstrations — 30% follow the optimal
+#     plan, 30% gamble (until a jackpot, then GOAL), 40% the TRAP; every action randomized
+#     with probability 0.2;
+#   - the VALUE V: the critic, trained by policy evaluation of π in the stochastic task.
+#
+# Methods, at the 0.7.0 accounting (g_fwd: one per policy forward, critic forward or
+# simulator call):
+#   - policy greedy; closed-loop best-of-N (N sampled continuations, the first action of the
+#     best sampled return);
+#   - beam (ch_beam): width B, K children from π, each child's transition sampled M times and
+#     ranked by the mean of r + V(x'), continuing from its first sample — a beam entry carries
+#     one realized outcome forward;
+#   - MCTS with chance nodes (ch_mcts): PUCT over actions; each traversal of an action samples
+#     its outcome, and a chance node keeps a child per outcome, so Q(a) averages the outcomes
+#     it has seen. Subtree reuse follows the real outcome;
+#   - expert iteration (ch_exit_collect / ch_exit_train; Anthony et al. 2017): the root's
+#     visit distribution at every real step, distilled into π by soft-target cross-entropy.
+#
+# The honest result (the demo's gate; docs/benchmarks.md § 11): the beam keeps the branches
+# where the gamble paid off — the optimizer's curse — and loses about 13 points of 55; MCTS,
+# averaging over outcomes, keeps its score. With the gamble made deterministic (CH_Q 0, the
+# same networks) the beam recovers, so the randomness is the cause. Distilling MCTS into π
+# fixes greedy decoding — and the beam too: the distilled prior stops proposing the gamble.
+#
+# Include AFTER src/mcts.cyr (the corridor's tokens and reward, mc_prompts, mc_sort_desc,
+# mc_value, MC_BMAX, MC_QSCALE).
+
+# the action whose outcome is random
+fn CH_GAMBLE(): i64 { return 6; }
+# the gamble's good outcome: opens GOAL (as K3 does)
+fn CH_JACK(): i64 { return 7; }
+# the gamble's bad outcome
+fn CH_BUST(): i64 { return 8; }
+# the demo's chance of a jackpot, per mille
+fn CH_Q(): i64 { return 250; }
+# the cost of a bust
+fn CH_LOSS(): i64 { return 8; }
+
+var CH_q = 250;         # the jackpot chance in force, per mille (ch_set_q)
+var CH_envseed = 0;     # the real outcomes' stream (ch_exit_collect uses its own)
+var CH_x2 = 0;          # the outcome of the last ch_sim
+var CH_dv = 0;          # (T+1) × V: the best expected return of m steps from x (ch_dp_table)
+var CH_DVq = 0 - 1;     # the q the table was built for
+var CH_DVT = 0;         # and the T
+
+# set the jackpot chance (per mille, 0..1000); 0 makes the gamble a certain bust
+fn ch_set_q(q): i64 {
+    guard((q >= 0) && (q <= 1000), "ch_set_q: q must be 0..1000 (per mille)");
+    CH_q = q;                                # ch_dp_table rebuilds for a new q
+    return 0;
+}
+
+# the reward of the step x --a--> x2 (f64): the task's definition
+fn ch_r(x, a, x2): i64 {
+    if (a == CH_GAMBLE()) {
+        if (x2 == CH_JACK()) { return f64_from(0); }
+        return f64_from(0 - CH_LOSS());
+    }
+    if ((a == CH_JACK()) || (a == CH_BUST())) { return MC_PEN(); }
+    if (a == MC_GOAL()) {
+        if ((x == MC_K3()) || (x == MC_GOAL()) || (x == CH_JACK())) { return f64_from(4); }
+        return MC_PEN();
+    }
+    return mc_true_r(x, a);
+}
+
+# the state action a leads to, given a uniform draw u in 0..999
+fn ch_next(a, u): i64 {
+    if (a == CH_GAMBLE()) {
+        if (u < CH_q) { return CH_JACK(); }
+        return CH_BUST();
+    }
+    return a;
+}
+
+# one counted simulator call: sample the outcome of x --a--> with the planner's RNG into
+# CH_x2 and return the step's reward
+fn ch_sim(x, a): i64 {
+    g_fwd = g_fwd + 1;
+    CH_x2 = ch_next(a, RUNI() % 1000);
+    return ch_r(x, a, CH_x2);
+}
+
+# splitmix64's finalizer (Steele et al. 2014), shifts masked to be logical: a non-negative hash
+fn ch_mix(z0): i64 {
+    var z = z0 + 0x9e3779b97f4a7c15;
+    z = (z ^ ((z >> 30) & 0x3FFFFFFFF)) * 0xbf58476d1ce4e5b9;
+    z = (z ^ ((z >> 27) & 0x1FFFFFFFFF)) * 0x94d049bb133111eb;
+    z = z ^ ((z >> 31) & 0x1FFFFFFFF);
+    return z & 0x7FFFFFFFFFFFFFFF;
+}
+
+# the real outcome's uniform draw (0..999) for episode e, step t: its own stream, the same
+# for every method, never seen by a planner
+fn ch_env_u(e, t): i64 { return ch_mix(CH_envseed * 1000003 + e * 4099 + t) % 1000; }
+
+# ---- the optimum in expectation: dynamic programming --------------------------------------
+
+# the expected value of action a from x with m >= 1 steps left, then acting optimally, from
+# the table as it stands (ch_dp_table builds with it)
+fn ch_qv(x, a, m): i64 {
+    if (a == CH_GAMBLE()) {
+        var q = f64_div(f64_from(CH_q), f64_from(1000));
+        var vj = f64_add(ch_r(x, a, CH_JACK()), load64(CH_dv + ((m - 1) * g_V + CH_JACK()) * 8));
+        var vb = f64_add(ch_r(x, a, CH_BUST()), load64(CH_dv + ((m - 1) * g_V + CH_BUST()) * 8));
+        return f64_add(f64_mul(q, vj), f64_mul(f64_sub(f64_from(1), q), vb));
+    }
+    return f64_add(ch_r(x, a, a), load64(CH_dv + ((m - 1) * g_V + a) * 8));
+}
+
+# build (or rebuild for a new q or T) the expectation DP table
+fn ch_dp_table(): i64 {
+    if ((CH_DVq == CH_q) && (CH_DVT == g_T)) { return 0; }
+    CH_dv = t_alloc((g_T + 1) * g_V); t_zero(CH_dv, g_V);
+    var m = 1;
+    while (m <= g_T) {
+        var x = 0;
+        while (x < g_V) {
+            var best = f64_from(0); var a = 0;
+            while (a < g_V) {
+                var v = ch_qv(x, a, m);
+                if ((a == 0) || (f64_gt(v, best) == 1)) { best = v; }
+                a = a + 1;
+            }
+            store64(CH_dv + (m * g_V + x) * 8, best);
+            x = x + 1;
+        }
+        m = m + 1;
+    }
+    CH_DVq = CH_q; CH_DVT = g_T;
+    return 0;
+}
+
+# the expected value of action a from x with m >= 1 steps left, then acting optimally
+fn ch_qval(x, a, m): i64 { ch_dp_table(); return ch_qv(x, a, m); }
+
+# the best expected return of T steps from prompt p
+fn ch_oracle_from(p): i64 { ch_dp_table(); return load64(CH_dv + (g_T * g_V + p) * 8); }
+
+# the action of best expected value from x with m >= 1 steps left (ties: the lowest token)
+fn ch_opt_action(x, m): i64 {
+    ch_dp_table();
+    var best = 0; var bv = f64_from(0); var a = 0;
+    while (a < g_V) {
+        var v = ch_qv(x, a, m);
+        if ((a == 0) || (f64_gt(v, bv) == 1)) { bv = v; best = a; }
+        a = a + 1;
+    }
+    return best;
+}
+
+# the mean best expected return over the evaluation prompts
+fn ch_oracle(nprompts, base_seed): i64 {
+    guard(nprompts >= 1, "ch_oracle: nprompts must be >= 1");
+    var prompts = mc_prompts(nprompts, base_seed);
+    var total = f64_from(0); var i = 0;
+    while (i < nprompts) { total = f64_add(total, ch_oracle_from(load64(prompts + i * 8))); i = i + 1; }
+    return f64_div(total, f64_from(nprompts));
+}
+
+# ---- the networks: a behavior-cloned prior and a policy-evaluation critic -------------------
+# One demonstration into R_states / R_actions: kind 0 the optimal plan, 1 the TRAP, 2 a gambler
+# (GAMBLE until a jackpot, then GOAL); each action replaced by a uniform token with probability
+# eps (per mille); the outcomes sampled.
+fn ch_demo(p, kind, eps): i64 {
+    var x = p; var t = 0;
+    while (t < g_T) {
+        store64(R_states + t * 8, x);
+        var a = MC_TRAP();
+        if (kind == 0) { a = ch_opt_action(x, g_T - t); }
+        if (kind == 2) {
+            if ((x == CH_JACK()) || (x == MC_GOAL())) { a = MC_GOAL(); } else { a = CH_GAMBLE(); }
+        }
+        if ((RUNI() % 1000) < eps) { a = RUNI() % g_V; }
+        store64(R_actions + t * 8, a);
+        x = ch_next(a, RUNI() % 1000);
+        t = t + 1;
+    }
+    return 0;
+}
+
+# Behavior-clone π: `steps` batches of `batch` demonstrations (the optimal plan with
+# probability psol per mille, a gambler with pgam, else the TRAP; noise eps per mille),
+# softmax cross-entropy descent with Adam.
+fn ch_bc_train(steps, batch, lr, psol, pgam, eps): i64 {
+    guard(batch >= 1, "ch_bc_train: batch must be >= 1");
+    memo_begin();
+    var inv = f64_div(f64_from(1), f64_from(batch * g_T));
+    var s = 0;
+    while (s < steps) {
+        pol_zero_grads();
+        var b = 0;
+        while (b < batch) {
+            var u = RUNI() % 1000; var kind = 1;
+            if (u < psol) { kind = 0; } elif (u < psol + pgam) { kind = 2; }
+            ch_demo(RUNI() % g_V, kind, eps);
+            rl_backward(f64_from(1));
+            b = b + 1;
+        }
+        pol_scale_grads(inv);
+        pol_adam_step(lr);
+        s = s + 1;
+    }
+    memo_end();
+    return 0;
+}
+
+# one rollout of π in the stochastic task into R_states / R_actions / R_rewards
+fn ch_rollout(p): i64 {
+    var x = p; var t = 0;
+    while (t < g_T) {
+        store64(R_states + t * 8, x);
+        pol_dist(x);
+        var a = pol_sample();
+        store64(R_actions + t * 8, a);
+        var x2 = ch_next(a, RUNI() % 1000);
+        store64(R_rewards + t * 8, ch_r(x, a, x2));
+        x = x2;
+        t = t + 1;
+    }
+    return 0;
+}
+
+var CH_b1t = 0; var CH_b2t = 0;     # the critic's own Adam bias-correction powers
+# Policy evaluation: `steps` rollouts of the frozen π in the stochastic task, the critic V
+# regressed on their GAE returns, with its own Adam bias-correction powers.
+fn ch_critic_train(steps, lr): i64 {
+    ac_ready("ch_critic_train: call ac_init() after pol_init()");
+    CH_b1t = f64_from(1); CH_b2t = f64_from(1);
+    memo_begin();
+    var invT = f64_div(f64_from(1), f64_from(g_T));
+    var s = 0;
+    while (s < steps) {
+        ch_rollout(RUNI() % g_V);
+        gae_values(); gae_advantages();
+        val_zero_grads(); critic_backward(f64_from(1));
+        t_scale(G_wv, g_D, invT); t_scale(G_bv, 1, invT);
+        CH_b1t = f64_mul(CH_b1t, ADAM_B1()); CH_b2t = f64_mul(CH_b2t, ADAM_B2());
+        adam_kernel(P_wv, G_wv, M_wv, V_wv, g_D, lr, CH_b1t, CH_b2t);
+        adam_kernel(P_bv, G_bv, M_bv, V_bv, 1, lr, CH_b1t, CH_b2t);
+        s = s + 1;
+    }
+    memo_end();
+    return 0;
+}
+
+# Set up the casino corridor at the demo's jackpot chance: a policy behavior-cloned for
+# `bc_steps` batches, its critic trained for `critic_steps` rollouts, the search buffers.
+# Seed `seed`.
+fn chance_setup_n(bc_steps, critic_steps, seed): i64 {
+    pol_init(MC_V(), MC_D(), MC_T(), MC_TRAP(), seed); ac_init();
+    g_datalen = 0;
+    ch_set_q(CH_Q()); CH_envseed = 0;
+    var lr = f64_div(f64_from(5), f64_from(100));
+    ch_bc_train(bc_steps, 16, lr, 300, 300, 200);
+    ch_critic_train(critic_steps, lr);
+    chance_init();
+    return 0;
+}
+
+# the demo's setup: 200 behavior-cloning batches, 400 critic rollouts, seed 7
+fn chance_setup(): i64 { return chance_setup_n(200, 400, 7); }
+
+# ---- buffers --------------------------------------------------------------------------------
+var CB_x = 0; var CB_s = 0; var CB_a0 = 0;      # beams: state, return so far, first action
+var CN_x = 0; var CN_s = 0; var CN_a0 = 0;      # the next depth's beams
+var CC_s = 0; var CC_key = 0; var CC_ix = 0;    # candidates: return so far, ranking key, order
+var CC_tmp = 0; var CC_x = 0; var CC_a0 = 0;    # merge scratch, state, first action
+# the tree: decision nodes (a state at a depth) and chance nodes (an action taken from one)
+fn CH_NMAX(): i64 { return 65536; }  # nodes of each kind per episode
+var DN_tok = 0;     # the decision node's state token
+var DN_dep = 0;     # its depth: real steps taken plus steps simulated
+var DN_N = 0;       # visits
+var DN_exp = 0;     # 1 once its priors are computed
+var DN_P = 0;       # NMAX × V: its priors π(·|tok)
+var DN_ch = 0;      # NMAX × V: the chance node of action a, or -1
+var KN_N = 0;       # the chance node's visits
+var KN_W = 0;       # f64: the sum of the returns through it
+var KN_kid = 0;     # NMAX × V: the decision node of outcome x2, or -1
+var CH_dn = 0; var CH_kn = 0;                   # nodes of each kind in use
+var CH_pd = 0; var CH_pk = 0; var CH_pr = 0;    # a simulation's path: nodes, chance nodes, rewards
+var CH_root = 0;    # the committed decision node
+var CI_T = 0; var CI_V = 0;                     # the dims chance_init sized the buffers for
+
+# allocate the beam and tree buffers for the current dims (chance_setup_n calls it)
+fn chance_init(): i64 {
+    var B = MC_BMAX();
+    CB_x = t_alloc(B); CB_s = t_alloc(B); CB_a0 = t_alloc(B);
+    CN_x = t_alloc(B); CN_s = t_alloc(B); CN_a0 = t_alloc(B);
+    var nc = B * g_V;
+    CC_s = t_alloc(nc); CC_key = t_alloc(nc); CC_ix = t_alloc(nc); CC_tmp = t_alloc(nc);
+    CC_x = t_alloc(nc); CC_a0 = t_alloc(nc);
+    var N = CH_NMAX();
+    DN_tok = t_alloc(N); DN_dep = t_alloc(N); DN_N = t_alloc(N); DN_exp = t_alloc(N);
+    DN_P = t_alloc(N * g_V); DN_ch = t_alloc(N * g_V);
+    KN_N = t_alloc(N); KN_W = t_alloc(N); KN_kid = t_alloc(N * g_V);
+    CH_pd = t_alloc(g_T + 1); CH_pk = t_alloc(g_T + 1); CH_pr = t_alloc(g_T + 1);
+    CI_T = g_T; CI_V = g_V;
+    return 0;
+}
+
+# the buffers must match the current dims
+fn chance_ready(who): i64 {
+    guard((CI_T == g_T) && (CI_V == g_V), who);
+    return 0;
+}
+
+# ---- the methods' choices: one action from state x with m steps left --------------------------
+var CH_N = 0; var CH_B = 0; var CH_K = 0; var CH_M = 0; var CH_S = 0; var CH_c = 0;
+
+# best-of-N: N continuations of π in the sampler; the first action of the best sampled return
+fn ch_bestn_act(x, m): i64 {
+    var best = f64_from(0); var ba = 0; var k = 0;
+    while (k < CH_N) {
+        var y = x; var j = 0; var sc = f64_from(0); var a0 = 0;
+        while (j < m) {
+            cnt_logits(y); pol_softmax();
+            var a = pol_sample();
+            if (j == 0) { a0 = a; }
+            sc = f64_add(sc, ch_sim(y, a)); y = CH_x2;
+            j = j + 1;
+        }
+        if ((k == 0) || (f64_gt(sc, best) == 1)) { best = sc; ba = a0; }
+        k = k + 1;
+    }
+    return ba;
+}
+
+# A beam of width CH_B over the m steps left: K distinct children of each beam from π, each
+# child's outcome sampled M times, ranked by the return so far plus the mean of r + V(x')
+# (the last step: the mean of r alone), continuing from the first sample. The first action of
+# the best beam.
+fn ch_beam_act(x, m): i64 {
+    var nb = 1;
+    store64(CB_x, x); store64(CB_s, f64_from(0)); store64(CB_a0, 0 - 1);
+    var inv = f64_div(f64_from(1), f64_from(CH_M));
+    var d = 0;
+    while (d < m) {
+        var nc = 0; var b = 0;
+        while (b < nb) {
+            var y = load64(CB_x + b * 8); var sb = load64(CB_s + b * 8);
+            cnt_logits(y); pol_softmax();
+            var got = 0; var tries = 0; var used = 0;
+            while ((got < CH_K) && (tries < 8 * CH_K)) {
+                var a = pol_sample(); tries = tries + 1;
+                if (((used >> a) & 1) == 0) {
+                    used = used | (1 << a);
+                    var rs = f64_from(0); var vs = f64_from(0); var j = 0; var x1 = 0;
+                    while (j < CH_M) {
+                        rs = f64_add(rs, ch_sim(y, a));
+                        if (j == 0) { x1 = CH_x2; }
+                        if (d < m - 1) { vs = f64_add(vs, mc_value(CH_x2)); }
+                        j = j + 1;
+                    }
+                    var s2 = f64_add(sb, f64_mul(rs, inv));
+                    store64(CC_s + nc * 8, s2);
+                    store64(CC_key + nc * 8, f64_add(s2, f64_mul(vs, inv)));
+                    store64(CC_x + nc * 8, x1);
+                    var a0 = load64(CB_a0 + b * 8);
+                    if (a0 < 0) { a0 = a; }
+                    store64(CC_a0 + nc * 8, a0); store64(CC_ix + nc * 8, nc);
+                    nc = nc + 1; got = got + 1;
+                }
+            }
+            b = b + 1;
+        }
+        mc_sort_desc(CC_ix, nc, CC_key, CC_tmp);
+        var keep = CH_B; if (nc < keep) { keep = nc; }
+        var k = 0;
+        while (k < keep) {
+            var c = load64(CC_ix + k * 8);
+            store64(CN_x + k * 8, load64(CC_x + c * 8)); store64(CN_s + k * 8, load64(CC_s + c * 8));
+            store64(CN_a0 + k * 8, load64(CC_a0 + c * 8));
+            k = k + 1;
+        }
+        var t1 = CB_x; CB_x = CN_x; CN_x = t1;
+        t1 = CB_s; CB_s = CN_s; CN_s = t1;
+        t1 = CB_a0; CB_a0 = CN_a0; CN_a0 = t1;
+        nb = keep;
+        d = d + 1;
+    }
+    return load64(CB_a0);
+}
+
+# a new decision node: state tok at depth dep
+fn ch_dnode(tok, dep): i64 {
+    guard(CH_dn < CH_NMAX(), "ch_mcts: decision node cap (CH_NMAX) reached");
+    var n = CH_dn;
+    store64(DN_tok + n * 8, tok); store64(DN_dep + n * 8, dep);
+    store64(DN_N + n * 8, 0); store64(DN_exp + n * 8, 0);
+    var a = 0; while (a < g_V) { store64(DN_ch + (n * g_V + a) * 8, 0 - 1); a = a + 1; }
+    CH_dn = CH_dn + 1;
+    return n;
+}
+
+# a new chance node
+fn ch_knode(): i64 {
+    guard(CH_kn < CH_NMAX(), "ch_mcts: chance node cap (CH_NMAX) reached");
+    var k = CH_kn;
+    store64(KN_N + k * 8, 0); store64(KN_W + k * 8, f64_from(0));
+    var a = 0; while (a < g_V) { store64(KN_kid + (k * g_V + a) * 8, 0 - 1); a = a + 1; }
+    CH_kn = CH_kn + 1;
+    return k;
+}
+
+# the PUCT choice at expanded decision node n: argmax over actions of Q/MC_QSCALE +
+# c·P·√N(n)/(1 + N(a)), Q(a) the mean return through a's chance node (0 unvisited)
+fn ch_puct(n, c): i64 {
+    var sqN = f64_sqrt(f64_from(load64(DN_N + n * 8)));
+    var best = 0 - 1; var bv = f64_from(0); var a = 0;
+    while (a < g_V) {
+        var k = load64(DN_ch + (n * g_V + a) * 8);
+        var q = f64_from(0); var nk = 0;
+        if (k >= 0) {
+            nk = load64(KN_N + k * 8);
+            if (nk > 0) { q = f64_div(f64_div(load64(KN_W + k * 8), f64_from(nk)), MC_QSCALE()); }
+        }
+        var pr = f64_mul(c, f64_mul(load64(DN_P + (n * g_V + a) * 8), sqN));
+        var u = f64_add(q, f64_div(pr, f64_from(1 + nk)));
+        if ((best < 0) || (f64_gt(u, bv) == 1)) { best = a; bv = u; }
+        a = a + 1;
+    }
+    return best;
+}
+
+# One simulation from root: descend by PUCT, sampling each chosen action's outcome (one
+# simulator call) and following — or creating — that outcome's child, to an unexpanded node;
+# expand it with π's priors (one policy forward) and value it with V scaled to the steps left
+# (one critic forward); back the return up through the chance nodes on the path.
+fn ch_simulate(root, c): i64 {
+    var n = root; var plen = 0; var leafv = f64_from(0);
+    while (1 == 1) {
+        var dep = load64(DN_dep + n * 8);
+        if (dep >= g_T) { break; }                               # the episode's end
+        var tok = load64(DN_tok + n * 8);
+        if (load64(DN_exp + n * 8) == 0) {
+            cnt_logits(tok); pol_softmax();
+            t_copy(DN_P + n * g_V * 8, S_probs, g_V);
+            store64(DN_exp + n * 8, 1);
+            if (n != root) {
+                leafv = f64_mul(mc_value(tok), f64_div(f64_from(g_T - dep), f64_from(g_T)));
+            }
+            break;
+        }
+        var a = ch_puct(n, c);
+        var k = load64(DN_ch + (n * g_V + a) * 8);
+        if (k < 0) { k = ch_knode(); store64(DN_ch + (n * g_V + a) * 8, k); }
+        var r = ch_sim(tok, a);
+        var x2 = CH_x2;
+        var d2 = load64(KN_kid + (k * g_V + x2) * 8);
+        if (d2 < 0) { d2 = ch_dnode(x2, dep + 1); store64(KN_kid + (k * g_V + x2) * 8, d2); }
+        store64(CH_pd + plen * 8, n); store64(CH_pk + plen * 8, k); store64(CH_pr + plen * 8, r);
+        plen = plen + 1;
+        n = d2;
+    }
+    store64(DN_N + n * 8, load64(DN_N + n * 8) + 1);
+    var G = leafv; var i = plen - 1;
+    while (i >= 0) {
+        G = f64_add(G, load64(CH_pr + i * 8));
+        var k2 = load64(CH_pk + i * 8);
+        store64(KN_N + k2 * 8, load64(KN_N + k2 * 8) + 1);
+        store64(KN_W + k2 * 8, f64_add(load64(KN_W + k2 * 8), G));
+        var nd = load64(CH_pd + i * 8);
+        store64(DN_N + nd * 8, load64(DN_N + nd * 8) + 1);
+        i = i - 1;
+    }
+    return 0;
+}
+
+# the most-visited action at decision node n (ties: the higher mean return), or -1
+fn ch_commit(n): i64 {
+    var best = 0 - 1; var bn = 0 - 1; var bq = f64_from(0); var a = 0;
+    while (a < g_V) {
+        var k = load64(DN_ch + (n * g_V + a) * 8);
+        if (k >= 0) {
+            var nk = load64(KN_N + k * 8);
+            var q = f64_from(0); if (nk > 0) { q = f64_div(load64(KN_W + k * 8), f64_from(nk)); }
+            if ((nk > bn) || ((nk == bn) && (f64_gt(q, bq) == 1))) { best = a; bn = nk; bq = q; }
+        }
+        a = a + 1;
+    }
+    return best;
+}
+
+# ---- expert iteration: the root's visit distributions, distilled into π -----------------------
+var XT_x = 0;       # recorded states
+var XT_p = 0;       # × V: the root's visit distribution at each
+var XT_n = 0;       # records
+var XT_cap = 0;     # their capacity
+var XT_rec = 0;     # 1 while ch_exit_collect records
+
+# record the root's visit distribution for state x (MCTS's choice at this real step)
+fn ch_exit_record(x): i64 {
+    guard(XT_n < XT_cap, "ch_exit_collect: record cap reached");
+    var tot = 0; var a = 0;
+    while (a < g_V) {
+        var k = load64(DN_ch + (CH_root * g_V + a) * 8);
+        if (k >= 0) { tot = tot + load64(KN_N + k * 8); }
+        a = a + 1;
+    }
+    store64(XT_x + XT_n * 8, x);
+    a = 0;
+    while (a < g_V) {
+        var k2 = load64(DN_ch + (CH_root * g_V + a) * 8); var w = f64_from(0);
+        if (k2 >= 0) { w = f64_div(f64_from(load64(KN_N + k2 * 8)), f64_from(tot)); }
+        store64(XT_p + (XT_n * g_V + a) * 8, w);
+        a = a + 1;
+    }
+    XT_n = XT_n + 1;
+    return 0;
+}
+
+# MCTS's choice: S simulations from the committed node, then its most-visited action
+fn ch_mcts_act(x): i64 {
+    var s = 0; while (s < CH_S) { ch_simulate(CH_root, CH_c); s = s + 1; }
+    if (XT_rec == 1) { ch_exit_record(x); }
+    return ch_commit(CH_root);
+}
+
+# method 0 greedy, 1 best-of-N, 2 beam, 3 MCTS, 4 the optimal policy: one action from x, t
+fn ch_act(method, x, t): i64 {
+    var m = g_T - t;
+    if (method == 0) { return pol_argmax(x); }
+    if (method == 1) { return ch_bestn_act(x, m); }
+    if (method == 2) { return ch_beam_act(x, m); }
+    if (method == 3) { return ch_mcts_act(x); }
+    return ch_opt_action(x, m);
+}
+
+# Run `method` closed-loop for one episode per prompt: an action per real step, its outcome
+# from the real stream (episode i, step t). MCTS keeps the subtree of the real outcome. The
+# mean real return.
+fn ch_run(method, neps, base_seed): i64 {
+    chance_ready("ch_run: call chance_init() after pol_init()");
+    var prompts = mc_prompts(neps, base_seed);
+    var total = f64_from(0); var i = 0;
+    while (i < neps) {
+        rng_seed(base_seed + 100003 * (i + 1));
+        var x = load64(prompts + i * 8); var t = 0; var R = f64_from(0);
+        if (method == 3) { CH_dn = 0; CH_kn = 0; CH_root = ch_dnode(x, 0); }
+        while (t < g_T) {
+            var a = ch_act(method, x, t);
+            var x2 = ch_next(a, ch_env_u(i, t));
+            R = f64_add(R, ch_r(x, a, x2));
+            if (method == 3) {
+                var k = load64(DN_ch + (CH_root * g_V + a) * 8);
+                var nr = 0 - 1;
+                if (k >= 0) { nr = load64(KN_kid + (k * g_V + x2) * 8); }
+                if (nr < 0) { CH_dn = 0; CH_kn = 0; nr = ch_dnode(x2, t + 1); }
+                CH_root = nr;
+            }
+            x = x2;
+            t = t + 1;
+        }
+        total = f64_add(total, R);
+        i = i + 1;
+    }
+    return f64_div(total, f64_from(neps));
+}
+
+# policy greedy (argmax π, closed loop): mean real return (T policy forwards per episode)
+fn ch_greedy(neps, base_seed): i64 {
+    guard(neps >= 1, "ch_greedy: neps must be >= 1");
+    return ch_run(0, neps, base_seed);
+}
+
+# closed-loop best-of-N: mean real return
+fn ch_best_of_n(N, neps, base_seed): i64 {
+    guard((N >= 1) && (neps >= 1), "ch_best_of_n: N and neps must be >= 1");
+    CH_N = N;
+    return ch_run(1, neps, base_seed);
+}
+
+# Closed-loop beam: width B, K children from π, each child's outcome sampled M times. Mean
+# real return.
+fn ch_beam(B, K, M, neps, base_seed): i64 {
+    guard((B >= 1) && (B <= MC_BMAX()), "ch_beam: B out of range (1..MC_BMAX)");
+    guard((K >= 1) && (K <= g_V), "ch_beam: K out of range (1..V)");
+    guard(M >= 1, "ch_beam: M must be >= 1");
+    guard(neps >= 1, "ch_beam: neps must be >= 1");
+    CH_B = B; CH_K = K; CH_M = M;
+    return ch_run(2, neps, base_seed);
+}
+
+# Closed-loop MCTS with chance nodes: S simulations per real step (2 <= S, S·T < CH_NMAX),
+# exploration weight c (f64). Mean real return.
+fn ch_mcts(S, c, neps, base_seed): i64 {
+    guard((S >= 2) && (S * g_T < CH_NMAX()), "ch_mcts: S out of range (2 .. CH_NMAX / T)");
+    guard(neps >= 1, "ch_mcts: neps must be >= 1");
+    CH_S = S; CH_c = c;
+    return ch_run(3, neps, base_seed);
+}
+
+# the optimal policy (in expectation) run in the real stream: its mean real return
+fn ch_oracle_run(neps, base_seed): i64 {
+    guard(neps >= 1, "ch_oracle_run: neps must be >= 1");
+    return ch_run(4, neps, base_seed);
+}
+
+# Expert-iteration data: MCTS (S, c) run for neps episodes on its own prompts and its own real
+# stream (envseed), the root's visit distribution recorded at every real step. Returns the
+# records made.
+fn ch_exit_collect(S, c, neps, base_seed, envseed): i64 {
+    guard(neps >= 1, "ch_exit_collect: neps must be >= 1");
+    XT_cap = neps * g_T;
+    XT_x = t_alloc(XT_cap); XT_p = t_alloc(XT_cap * g_V); XT_n = 0;
+    var keep = CH_envseed; CH_envseed = envseed;
+    XT_rec = 1;
+    ch_mcts(S, c, neps, base_seed);
+    XT_rec = 0; CH_envseed = keep;
+    return XT_n;
+}
+
+# Distill the recorded visit distributions into π: `epochs` full-batch steps of soft-target
+# cross-entropy (the seed Σ_a p_a·(π − onehot(a)) = π − p), Adam at lr.
+fn ch_exit_train(epochs, lr): i64 {
+    guard(XT_n >= 1, "ch_exit_train: no records (run ch_exit_collect first)");
+    memo_begin();
+    var inv = f64_div(f64_from(1), f64_from(XT_n));
+    var e = 0;
+    while (e < epochs) {
+        pol_zero_grads();
+        var i = 0;
+        while (i < XT_n) {
+            var x = load64(XT_x + i * 8); var a = 0;
+            while (a < g_V) {
+                var w = load64(XT_p + (i * g_V + a) * 8);
+                if (f64_gt(w, f64_from(0)) == 1) { pol_dist(x); pol_seed_bwd(x, a, w); }
+                a = a + 1;
+            }
+            i = i + 1;
+        }
+        pol_scale_grads(inv);
+        pol_adam_step(lr);
+        e = e + 1;
+    }
+    memo_end();
+    return 0;
+}

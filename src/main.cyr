@@ -1,7 +1,8 @@
 # tarka — the demo driver: every method in the reference trains or deliberates on a small
 # task and must pass its gate (REINFORCE, PPO, GRPO, the parity sample-efficiency
 # benchmark, learned PRM/ORM rewards, self-consistency and verifier best-of-N, PRM-guided
-# beam search, DPO + the KL penalty, IPO + KTO). Exit 0 = ALL GATES PASS. With
+# beam search, prior-guided MCTS, MCTS under chance with expert iteration, DPO + the KL
+# penalty, IPO + KTO). Exit 0 = ALL GATES PASS. With
 # `--pref <file>` it trains DPO / IPO / KTO from an ifran preference export instead
 # (src/pref_ingest.cyr). A leading `--gpu` (1.5.0) fills the memo regions' logits tables
 # on the device through rosnet's GPU bundle — bit-exact, so every result is the CPU's
@@ -24,6 +25,7 @@ include "src/preference.cyr"  # reward-model transmission demo (learned reward -
 include "src/reasoning.cyr"  # verifier-guided reasoning (self-consistency, best-of-N)
 include "src/search.cyr"     # PRM-guided tree (beam) search on a sequential task
 include "src/mcts.cyr"       # prior-guided MCTS (PUCT) vs beams with the same prior + value
+include "src/chance.cyr"     # MCTS with chance nodes vs sampled beams; expert iteration (1.6.0)
 include "src/report.cyr"       # print_f2 / print_cd (shared with the --pref driver)
 include "src/pref_ingest.cyr"  # ifran pref-export JSONL ingestion (--pref): DPO/IPO/KTO from curated sets
 
@@ -44,6 +46,12 @@ fn file_seek(fd, off): i64 { return 0 - 1; }
 # print one MCTS-demo row: the label, the true return, the forwards per prompt
 fn mc_row(label, v, f): i64 {
     puts(label); print_f2(v); puts("   (fwd/prompt "); fmt_int(f); puts(")\n");
+    return 0;
+}
+
+# print one chance-demo row: the label, the real return, the forwards per episode
+fn ch_row(label, v, f): i64 {
+    puts(label); print_f2(v); puts("   (fwd/episode "); fmt_int(f); puts(")\n");
     return 0;
 }
 
@@ -326,6 +334,63 @@ fn main(): i64 {
         puts("    myopic beams at matched compute; a beam with the same prior + value matches it at less compute\n");
     } else { puts("  mcts GATE FAIL\n"); }
 
+    # ---- reasoning (MCTS under chance): a random outcome the beam over-trusts ----
+    # The casino corridor (src/chance.cyr): the corridor plus GAMBLE, a shortcut that pays off
+    # with probability 1/4 and otherwise costs 8 — a loss in expectation. The planners get a
+    # sampler only; every method acts closed-loop on the same real outcomes.
+    puts("\n--- reasoning (MCTS under chance): a gamble a sampled beam over-trusts ---\n");
+    chance_setup();
+    var cnp = 40; var cseed = 2000; var c1 = f64_from(1);
+    var c_or = ch_oracle(cnp, cseed);
+    g_fwd = 0; var c_gr = ch_greedy(cnp, cseed); var fc_gr = g_fwd / cnp;
+    g_fwd = 0; var c_bon = ch_best_of_n(64, cnp, cseed); var fc_bon = g_fwd / cnp;
+    g_fwd = 0; var c_bm = ch_beam(16, 4, 1, cnp, cseed); var fc_bm = g_fwd / cnp;
+    g_fwd = 0; var c_b4 = ch_beam(16, 4, 4, cnp, cseed); var fc_b4 = g_fwd / cnp;
+    g_fwd = 0; var c_mc = ch_mcts(128, c1, cnp, cseed); var fc_mc = g_fwd / cnp;
+    ch_set_q(0);                                 # the same networks; the gamble always busts
+    g_fwd = 0; var c_b0 = ch_beam(16, 4, 1, cnp, cseed); var fc_b0 = g_fwd / cnp;
+    ch_set_q(CH_Q());
+    puts("  real return, mean of "); fmt_int(cnp); puts(" episodes (optimum in expectation ");
+    print_f2(c_or); puts("):\n");
+    ch_row("  policy greedy:                       ", c_gr, fc_gr);
+    ch_row("  best-of-64:                          ", c_bon, fc_bon);
+    ch_row("  beam (B 16, K 4):                    ", c_bm, fc_bm);
+    ch_row("  beam, 4 outcome samples (B 16, K 4): ", c_b4, fc_b4);
+    ch_row("  MCTS, chance nodes (S 128):          ", c_mc, fc_mc);
+    puts("  the same networks, the gamble made certain to bust:\n");
+    ch_row("  beam (B 16, K 4):                    ", c_b0, fc_b0);
+    # expert iteration: MCTS's visit counts on 32 episodes of its own, distilled into π
+    ch_exit_collect(128, c1, 32, 9000, 1);
+    ch_exit_train(200, f64_div(f64_from(5), f64_from(100)));
+    g_fwd = 0; var x_gr = ch_greedy(cnp, cseed); var fx_gr = g_fwd / cnp;
+    g_fwd = 0; var x_bm = ch_beam(16, 4, 1, cnp, cseed); var fx_bm = g_fwd / cnp;
+    g_fwd = 0; var x_mc = ch_mcts(64, c1, cnp, cseed); var fx_mc = g_fwd / cnp;
+    puts("  expert iteration (π trained on MCTS's visit counts):\n");
+    ch_row("  policy greedy:                       ", x_gr, fx_gr);
+    ch_row("  beam (B 16, K 4):                    ", x_bm, fx_bm);
+    ch_row("  MCTS, chance nodes (S 64):           ", x_mc, fx_mc);
+
+    # chance gate, three claims:
+    #   - MCTS reaches 90% of the optimum and beats the beam, and best-of-N and the averaged
+    #     beam at matched-or-higher compute for them;
+    #   - the cause is chance: the beam is under 90% here, and over it with the gamble made
+    #     certain (the same networks);
+    #   - expert iteration: the distilled π decodes greedily 10 points above the cloned one,
+    #     and as MCTS's prior does at least as well at no more compute.
+    var c_floor = f64_mul(c_or, f64_div(f64_from(90), f64_from(100)));
+    var chance_ok = 0;
+    if ((f64_gt(c_mc, c_floor) == 1)
+        && (f64_gt(c_mc, c_bon) == 1) && (fc_bon >= fc_mc)
+        && (f64_gt(c_mc, c_b4) == 1) && (fc_b4 >= fc_mc)
+        && (f64_gt(c_mc, c_bm) == 1)
+        && (f64_lt(c_bm, c_floor) == 1) && (f64_gt(c_b0, c_floor) == 1)
+        && (f64_gt(x_gr, f64_add(c_gr, f64_from(10))) == 1)
+        && (f64_lt(x_mc, c_mc) == 0) && (fx_mc <= fc_mc)) {
+        chance_ok = 1;
+        puts("  chance GATE PASS: averaging over outcomes, MCTS avoids the gamble a sampled beam keeps; the\n");
+        puts("    beam recovers when the gamble is certain; distilling MCTS fixes greedy decoding (and the beam)\n");
+    } else { puts("  chance GATE FAIL\n"); }
+
     # ---- alignment: DPO (preferences only) + RLHF KL-to-reference-policy penalty ----
     # DPO aligns the policy from PREFERENCES ALONE — no reward model, no value critic, no
     # sampler-in-the-loop reward: each step prefers the higher-target-count rollout while the
@@ -396,8 +461,8 @@ fn main(): i64 {
     } else { puts("  preference-ext GATE FAIL\n"); }
 
     gpu_report();
-    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (mcts_ok == 1) && (align_ok == 1)
-        && (ext_ok == 1)) {
+    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (mcts_ok == 1) && (chance_ok == 1)
+        && (align_ok == 1) && (ext_ok == 1)) {
         puts("\n  ALL GATES PASS\n"); return 0;
     }
     puts("\n  GATE FAIL\n");

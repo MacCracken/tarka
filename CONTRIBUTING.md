@@ -8,7 +8,7 @@
 2. `cyrius deps` — resolve stdlib + the sibling deps (rosnet / tyche / akshara)
    into `lib/`.
 3. `cyrius build src/main.cyr build/tarka` — compile the demo (every milestone
-   end-to-end; prints `ALL GATES PASS`, ≈ 1.3 s; `./build/tarka --gpu` must print the same
+   end-to-end; prints `ALL GATES PASS` in a few seconds; `./build/tarka --gpu` must print the same
    lines apart from its `GPU: ` ones).
 4. `cyrius test` — the suites: the finite-difference grad-checks (`tests/tarka.tcyr`),
    the `--pref` ingestion suite (`tests/pref_ingest.tcyr`), the unit suite

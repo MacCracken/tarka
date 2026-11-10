@@ -1,4 +1,4 @@
-# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2 + v1.2.2 + v1.3.0 + v1.4.0 + v1.5.0)
+# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2 + v1.2.2 + v1.3.0 + v1.4.0 + v1.5.0 + v1.6.0)
 
 > Satisfies the v1.0 criterion *"Public RL/reasoning API frozen — every exported symbol
 > documented and tested."*
@@ -16,7 +16,8 @@ to mis-parse. v1.3.0 added the two-length preference primitives (`dpo_*2`, `ipo_
 `tarka_pref_ingest_opts` and the `--pref` options, again without changing a signature; its
 aggregated backward moves training results by floating-point rounding (a labeled behavior change,
 [ADR 0002](adr/0002-optimizations-preserve-bits.md)). v1.4.0 added `src/mcts.cyr`; v1.5.0 added the
-device path (`dev_table`, its counters, `--gpu`), again changing no signature and no CPU result. Each symbol is exercised by the demo (`src/main.cyr`), the suites (`tests/tarka.tcyr`
+device path (`dev_table`, its counters, `--gpu`), again changing no signature and no CPU result;
+v1.6.0 added `src/chance.cyr`. Each symbol is exercised by the demo (`src/main.cyr`), the suites (`tests/tarka.tcyr`
 grad-checks, `tests/pref_ingest.tcyr`, `tests/units.tcyr`, the bit-for-bit `tests/golden.tcyr`),
 and/or the quickstart consumer (`examples/quickstart.cyr`) — noted per row.
 
@@ -58,7 +59,7 @@ precondition violated: …`; exit status 1).
 | `rl_eval(nroll)` → f64 | mean reward over `nroll` rollouts | demo, quickstart |
 | `rl_rollout(prompt)` / `rl_prompt()` → i64 / `rl_reward()` → f64 | sample a rollout / draw a prompt / score the current rollout | demo, suite |
 | `pol_logits(x)` / `pol_softmax()` / `pol_sample()` → i64 | per-step distribution / normalize / sample (custom decoding) | demo, suite |
-| `guard(cond, msg)` | fail-loud precondition guard (stdlib `panic`: `panic: tarka: precondition violated: <msg>`, exit 1) — the hardening primitive | demo, `tests/abort/` (18 probes) |
+| `guard(cond, msg)` | fail-loud precondition guard (stdlib `panic`: `panic: tarka: precondition violated: <msg>`, exit 1) — the hardening primitive | demo, `tests/abort/` (23 probes) |
 | `ADAM_B1()` `ADAM_B2()` `ADAM_EPS()` `RL_BETA()` | optimizer / baseline hyperparameters | suite |
 
 ## Actor-critic: PPO + GRPO — `src/actorcritic.cyr`
@@ -208,6 +209,33 @@ compute.
 calls), `mc_demo`, `mc_opt_action`, `mc_dp_table`, `mc_fill_rewards`, `mc_prompts`, `mc_sort_desc`,
 `mc_cand`, `mc_node`, `mc_puct_pick`, `mc_simulate`, `mc_commit_child`, and the `EB_*` / `EN_*` /
 `EC_*` / `ND_*` / `MC_*` tables.
+
+## MCTS under chance + expert iteration — `src/chance.cyr` (added v1.6.0)
+
+The casino corridor: 1.4.0's corridor plus GAMBLE, a shortcut that lands on JACKPOT (which opens
+GOAL) with probability `CH_Q()`/1000, and otherwise on BUST (costing `CH_LOSS()`). It loses in
+expectation. The planners get a sampler only; every method acts closed-loop, one action per real
+step, on real outcomes from their own stream. See [ADR 0005](adr/0005-mcts-under-chance.md).
+
+| symbol | purpose | tested by |
+|--------|---------|-----------|
+| `chance_setup()` / `chance_setup_n(bc_steps, critic_steps, seed)` | the task at q = 1/4: a policy behavior-cloned from optimal / gambling / TRAP demonstrations, its critic by policy evaluation in the stochastic task, the buffers (the demo: 200, 400, seed 7) | demo, golden, units |
+| `chance_init()` | allocate the beam and tree buffers for the current dims (`chance_setup_n` calls it) | units |
+| `ch_mcts(S, c, neps, base_seed)` → f64 | MCTS with chance nodes: S PUCT simulations per real step (`2 ≤ S`, `S·T < CH_NMAX()`), each traversal sampling its action's outcome; subtree reuse follows the real outcome; mean real return | demo, golden, units |
+| `ch_beam(B, K, M, neps, base_seed)` → f64 | closed-loop beam, width `B ≤ MC_BMAX()`, K children from π, each child's outcome sampled `M` times and ranked by the mean of r + V | demo, golden |
+| `ch_best_of_n(N, neps, base_seed)` / `ch_greedy(neps, base_seed)` → f64 | closed-loop best-of-N (the first action of the best sampled return) / argmax π | demo, golden |
+| `ch_exit_collect(S, c, neps, base_seed, envseed)` → records | expert-iteration data: MCTS run on its own prompts and real stream, the root's visit distribution recorded at every real step | demo, golden, units |
+| `ch_exit_train(epochs, lr)` | distil the records into π: soft-target cross-entropy (seed π − p), Adam | demo, golden |
+| `ch_oracle(neps, base_seed)` / `ch_oracle_from(p)` / `ch_oracle_run(neps, base_seed)` → f64 | the optimum in expectation (dynamic programming) over prompts / from one; the optimal policy run in the real stream | demo, units, golden |
+| `ch_qval(x, a, m)` / `ch_opt_action(x, m)` | the expected value of an action with m steps left / the best action | units |
+| `ch_set_q(q)` | the jackpot chance, per mille (0..1000; 0 = a certain bust) | demo, units |
+| `ch_r(x, a, x2)` / `ch_next(a, u)` / `ch_sim(x, a)` / `ch_env_u(e, t)` | a step's reward / its outcome for a draw `u` in 0..999 / one counted simulator call (outcome in `CH_x2`) / the real stream's draw for episode e, step t | units |
+| `CH_GAMBLE/JACK/BUST()` `CH_Q()` `CH_LOSS()` `CH_NMAX()` | tokens, the demo's chance and loss, the tree cap | units |
+
+**Not frozen (internal mechanism):** `ch_qv`, `ch_dp_table`, `ch_mix`, `ch_demo`, `ch_bc_train`,
+`ch_rollout`, `ch_critic_train`, `chance_ready`, `ch_run`, `ch_act`, `ch_bestn_act`, `ch_beam_act`,
+`ch_mcts_act`, `ch_dnode`, `ch_knode`, `ch_puct`, `ch_simulate`, `ch_commit`, `ch_exit_record`, and
+the `CB_*` / `CN_*` / `CC_*` / `DN_*` / `KN_*` / `XT_*` / `CH_*` state.
 
 ## Device path — `--gpu` (added v1.5.0)
 

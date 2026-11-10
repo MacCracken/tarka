@@ -11,7 +11,8 @@
 # ingest" (two-length pairs), then every case but "search" (the per-state aggregated backward
 # reorders the policy gradient's sums; search trains only the reward model). 1.4.0 added "mcts"
 # and moved no other case. 1.5.0 runs every case a second time under rosnet's g_gpu (--gpu),
-# against the same digests (docs/adr/0004-gpu-parity-backend.md). Parameter digests and
+# against the same digests (docs/adr/0004-gpu-parity-backend.md). 1.6.0 added "chance" and
+# moved no other case. Parameter digests and
 # metric digests are kept apart so a metric-only fix (e.g. a corrected average) cannot hide
 # a training change.
 
@@ -28,6 +29,7 @@ include "src/preference.cyr"
 include "src/reasoning.cyr"
 include "src/search.cyr"
 include "src/mcts.cyr"
+include "src/chance.cyr"
 include "src/report.cyr"
 include "src/pref_ingest.cyr"
 
@@ -176,6 +178,28 @@ fn case_corpus(): i64 {
     g_datalen = 0;
     return g_h;
 }
+# MCTS under chance, the sampled beams, the gamble made certain, and expert iteration on the
+# casino corridor, at a reduced size
+fn case_chance(): i64 {
+    chance_setup_n(40, 80, 7);
+    gh_reset();
+    gh_word(ch_oracle(6, 2000)); gh_word(ch_oracle_run(6, 2000));
+    g_fwd = 0; gh_word(ch_greedy(6, 2000)); gh_word(g_fwd);
+    g_fwd = 0; gh_word(ch_best_of_n(8, 6, 2000)); gh_word(g_fwd);
+    g_fwd = 0; gh_word(ch_beam(4, 4, 1, 6, 2000)); gh_word(g_fwd);
+    g_fwd = 0; gh_word(ch_beam(4, 4, 3, 6, 2000)); gh_word(g_fwd);
+    g_fwd = 0; gh_word(ch_mcts(32, f64_from(1), 6, 2000)); gh_word(g_fwd);
+    ch_set_q(0);
+    g_fwd = 0; gh_word(ch_beam(4, 4, 1, 6, 2000)); gh_word(g_fwd);
+    ch_set_q(CH_Q());
+    gh_word(ch_exit_collect(16, f64_from(1), 4, 9000, 1));
+    gh_block(XT_p, XT_n * g_V);
+    ch_exit_train(20, LR());
+    g_fwd = 0; gh_word(ch_greedy(6, 2000)); gh_word(g_fwd);
+    gh_policy(); gh_critic();
+    return g_h;
+}
+
 # prior-guided MCTS and the beams on the corridor, at a reduced size
 fn case_mcts(): i64 {
     mcts_setup_n(40, 80, 7);
@@ -261,6 +285,7 @@ fn run_all(gpu): i64 {
     check(gname("kto", gpu), case_kto(), 0x7842b1b30885e058, 0x5cde51b5d0e48db1);
     check(gname("corpus reinforce", gpu), case_corpus(), 0xe3e9df5346490389, 0x49dabcd2a1a09b2b);
     check(gname("mcts", gpu), case_mcts(), 0x55524cb2abddbc6d, 0x94eb754bdb1111e3);
+    check(gname("chance", gpu), case_chance(), 0x06adcab7bbe43688, 0x9e2b06e4d8e043e9);
     check(gname("pref ingest", gpu), case_pref(), 0xfea56cab63ff976b, 0xbce9385d4c0eadcc);
     g_gpu = 0;
     return 0;

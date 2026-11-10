@@ -4,6 +4,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-09
+
+The 1.6.x roadmap line: MCTS on a task where the tree, not just the value, matters, gated
+against the strongest beams the same networks and the same sampler allow, with the ablation that
+names the cause ([ADR 0005](docs/adr/0005-mcts-under-chance.md)). Toolchain and dependencies are
+unchanged. Additive: no public signature changed, no golden case moved, and every number the demo
+printed at 1.5.0 is unchanged.
+
+### Added
+
+- **`src/chance.cyr` — the casino corridor.**
+  - **The task.** 1.4.0's corridor plus GAMBLE: with probability 1/4 it lands on JACKPOT, which
+    opens GOAL at once (a shortcut past the three keys), and otherwise on BUST, costing 8. From a
+    neutral token it is worth 45 in expectation, against the corridor's 52. The optimum in
+    expectation comes from dynamic programming (54.89 over the demo's 40 prompts).
+  - **The setting.** The planners get a sampler only: each `ch_sim` call is one counted forward.
+    Every method acts closed-loop, one action per real step. The real outcomes come from their own
+    stream, a splitmix64 hash of (episode, step), the same for every method and never seen by a
+    planner.
+  - **The networks.** A prior behavior-cloned from optimal, gambling and TRAP demonstrations, and
+    its critic, trained by policy evaluation in the stochastic task.
+  - **MCTS with chance nodes** (`ch_mcts`). PUCT over actions; each traversal samples the chosen
+    action's outcome, and a chance node keeps one child per outcome, so Q averages the outcomes the
+    tree has seen. Subtree reuse follows the real outcome.
+  - **Baselines, given the same networks.** Closed-loop greedy, best-of-N, and beams (`ch_beam`: K
+    children from π, each child's outcome sampled M times and ranked by the mean of r + V).
+  - **Expert iteration** (`ch_exit_collect` / `ch_exit_train`). The root's visit distribution at
+    every real step is distilled into π by soft-target cross-entropy. It uses the existing seed
+    kernel (`Σ_a p_a·(π − onehot(a)) = π − p`) and the aggregated backward, with no new backward
+    math.
+- **The demo's chance section and gate** (seed 7, 40 episodes):
+  - **Results.** MCTS S128 scores **52.79 @16,494** forwards per episode. Against it: the beam B16
+    K4 39.52 @14,775, the 4-sample beam 47.29 @53,873, and best-of-64 39.45 @17,408.
+  - **The ablation.** With the same networks and the gamble made a certain bust (`ch_set_q(0)`),
+    the beam recovers to **53.39**.
+  - **Expert iteration.** It lifts greedy 32.10 → **49.50** at 16 forwards and the beam to 50.39,
+    and as MCTS's prior it reaches the optimum, 54.89, at S64.
+  - **The gate's three claims.** MCTS reaches 90% of the optimum and beats every beam and
+    best-of-N, which cost matched or higher compute. The beam is under 90% because of chance and
+    over it without chance. The distilled π decodes greedily at least 10 points higher, and as
+    MCTS's prior does as well at half the simulations. All three hold for three independently
+    trained priors (`docs/benchmarks.md` § 11).
+- **Tests:**
+  - units +26: the reward and outcomes, the real stream's independence from the planner RNG, the
+    expectation optimum (52, 45, 60, 40 at q = 1/4, 1 and 0), the chance tree's books, and the
+    expert-iteration records;
+  - a golden case `chance` on both targets, checked on the CPU and under `--gpu` (33 assertions);
+  - five abort probes: a beam past `MC_BMAX`, fewer than 2 simulations, stale buffers, q past 1000,
+    and distilling with no records (23 probes in all);
+  - three benchmarks (25 in all);
+  - a 14-mutant run of the module, all killed. The test for the expectation optimum caught
+    `ch_qval` reading a table left over from another q; it now rebuilds first.
+- **ADR 0005**, benchmarks § 11, and sources rows for chance nodes (Antonoglou et al. 2022;
+  Kearns, Mansour & Ng 2002), the optimizer's curse (Smith & Winkler 2006), visit-count targets
+  (Silver et al. 2018) and splitmix64 (Steele et al. 2014).
+
+### Changed
+
+- The demo grows by the chance section: about 2.4 s on a host loaded by other jobs, where the rest
+  of the demo, 1.28 s on a quiet host, took 2.8 s. The whole demo took 2.75 s at a load of about 6.5.
+- On aarch64 the demo now prints one row differently from x86_64: the 4-sample beam scores 47.75
+  @53,878, where x86_64 scores 47.29 @53,873. aarch64 fuses rosnet's multiply-add, so the networks'
+  low-order bits differ there (the reason the golden gate keeps a table per target), and this
+  beam's result moves with them. Through 1.5.0 every printed number matched. The gate holds on
+  both targets.
+- Roadmap: the 1.6.x line is done. MCTS against an opponent (a two-player task, minimax backup) is
+  recorded as unscheduled.
+
 ## [1.5.0] - 2026-11-09
 
 The 1.5.x roadmap line: `--gpu` through rosnet's GPU bundle, shipped as a **bit-exact parity

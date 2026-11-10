@@ -32,7 +32,9 @@ the *methods* are the point):
 - **Reasoning** — inference-time deliberation: **self-consistency** (sample-and-vote),
   **verifier best-of-N**, **PRM-guided beam search** that steers generation to a
   verifier objective greedy and best-of-N cannot reach, and **prior-guided MCTS** (PUCT with a
-  learned prior and value), gated honestly against a beam given the same networks.
+  learned prior and value), gated honestly against a beam given the same networks — and
+  **MCTS with chance nodes** plus **expert iteration**, where a random outcome breaks the beam and
+  distilling the search into the policy fixes greedy decoding.
 - **A GPU path** — `tarka --gpu` fills the memo's logits tables on the device through rosnet's
   GPU bundle, in its bit-exact class: same output, held by the golden gate. On the reference
   iGPU it is slower than the CPU at every shape tarka has, and says so
@@ -54,6 +56,7 @@ input path) and [0.8.0](docs/audit/2026-06-22-audit.md).
 | verifier best-of-N (true reward, N=16) | **892** vs 530 mean ≈ oracle 894 |
 | PRM-guided beam vs best-of-N vs greedy (matched compute) | **13.50** vs 4.05 vs 0.20 of 16 |
 | prior-guided MCTS vs myopic beam / best-of-64 (delayed payoff, optimum 54) | **54.00** vs 24.19 / 36.37 — and a prior + value beam 53.42 at half the compute |
+| MCTS with chance nodes vs a sampled beam (a losing gamble, optimum 54.89) | **52.79** vs 39.52 — the beam recovers to 53.39 when the gamble is certain; expert iteration lifts greedy 32.10 → 49.50 |
 | DPO from preferences alone / KL penalty | target 0.94 → **24.00** / KL 3.33 → 2.46 |
 | IPO margin / KTO log-ratios | h 0.00 → **0.85** (target 1.00) / ρ +80.31 vs −138.27 |
 
@@ -88,7 +91,8 @@ cyrius build src/main.cyr build/tarka    # compile to a static ELF
 cyrius test                              # grad-checks, ingestion, units, the golden gate
 ```
 
-The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 1.3 s). `--pref`
+The demo runs each milestone end-to-end and prints `ALL GATES PASS` (a few seconds; § 11 of
+[`docs/benchmarks.md`](docs/benchmarks.md) has the timings). `--pref`
 refuses files over 1 MB and prints why each refused row was refused. Under `--gpu`, every line
 but the `GPU: ` ones is the CPU run's, byte for byte.
 

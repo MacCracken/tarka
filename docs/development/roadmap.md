@@ -1,7 +1,7 @@
 # tarka — Roadmap
 
 > What ships next, by release line. Shipped work is in [`CHANGELOG.md`](../../CHANGELOG.md)
-> (0.1.0 → 1.5.0); live state is in [`state.md`](state.md).
+> (0.1.0 → 1.6.0); live state is in [`state.md`](state.md).
 >
 > **The 1.x rule.** A 1.x release may add symbols to the frozen API ([`docs/api.md`](../api.md))
 > and may move results as a *labeled behavior change* — it re-records the golden cases it
@@ -9,19 +9,15 @@
 > It may not change or remove a frozen signature. Anything that would is in the
 > [2.0.0 backlog](#200-backlog--breaks-the-frozen-1x-api).
 
-## 1.6.x — MCTS where the tree matters
-
-- **MCTS on a stochastic or adversarial task.** 1.4.0 shipped prior-guided PUCT on a
-  deterministic task, where a beam given the same prior and value matches it at less compute
-  ([ADR 0003](../adr/0003-prior-guided-mcts.md)). MCTS's own advantage — averaging over chance
-  outcomes, or an opponent's replies, where a beam keeps lucky branches — needs a task with
-  stochastic transitions or two players. Expert iteration (training π on MCTS's visit counts)
-  belongs with it. Gated as 1.4.0 was: against the strongest beam the same networks allow.
-
 ## 1.x.x — unscheduled
 
 Recorded so they are not lost; each waits for a caller that needs it.
 
+- **MCTS against an opponent.** 1.6.0 showed MCTS's advantage under chance
+  ([ADR 0005](../adr/0005-mcts-under-chance.md)). The other half is a two-player task, where a
+  beam that maximizes over both players' moves ignores the opponent's replies. It needs a second
+  policy (or self-play) and a minimax backup. Gate it as 1.4.0 and 1.6.0 were: against the
+  strongest beam the same networks allow, with an ablation that names the cause.
 - **A GPU path that pays.** 1.5.0's `--gpu` is bit-exact and slower than the CPU at every shape
   tarka has on the reference iGPU ([ADR 0004](../adr/0004-gpu-parity-backend.md)). It waits for a
   device or a batched kernel on which a dispatch beats the CPU. Then a tolerance class
