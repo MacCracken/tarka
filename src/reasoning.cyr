@@ -19,16 +19,23 @@
 # Include AFTER bench_m3.cyr (uses par_correct/par_true_reward/par_grpo_step, rm_*). New
 # file; touches no existing code (the 24 grad-checks stay byte-identical).
 
+# reasoning task: vocab size
 fn REASON_V(): i64 { return 12; }
+# reasoning task: embedding dim
 fn REASON_D(): i64 { return 8; }
+# reasoning task: chain length
 fn REASON_T(): i64 { return 16; }
+# reasoning task: the even-class answer
 fn REASON_TGT(): i64 { return 2; }
+# reasoning task: the odd-class answer
 fn REASON_DECOY(): i64 { return 3; }
-fn REASON_STEPS(): i64 { return 15; }     # PARTIAL GRPO steps -> single-sample ~627/1000 (calibrated headroom; fixed)
+# PARTIAL GRPO steps -> single-sample ~627/1000 (calibrated headroom; fixed)
+fn REASON_STEPS(): i64 { return 15; }
 
 # answer + oracle (deterministic; no RNG)
 fn reason_oracle(x0): i64 { if ((x0 & 1) == 0) { return REASON_TGT(); } return REASON_DECOY(); }   # = par_correct(x0)
-fn reason_answer(): i64 {                  # majority parity-class of the realized states
+# majority parity-class of the realized states
+fn reason_answer(): i64 {
     var even = 0; var t = 0;
     while (t < g_T) { if ((load64(R_states + t*8) & 1) == 0) { even = even + 1; } t = t + 1; }
     if (even * 2 >= g_T) { return REASON_TGT(); }       # tie -> TGT (fixed deterministic tiebreak)
@@ -44,14 +51,17 @@ fn reason_setup_q(qsteps): i64 {
     rm_train_prm(400, 16, lr);                                                # the verifier (PRM)
     return 0;
 }
+# reason_setup_q at the calibrated REASON_STEPS
 fn reason_setup(): i64 { return reason_setup_q(REASON_STEPS()); }
 
 # ---- inference-time methods (all read the frozen policy + PRM) -------------------
 # self-consistency: majority vote of the chain answer over N rollouts of the same prompt.
 fn reason_self_consistency(p, N): i64 {
     guard(N >= 1, "reason_self_consistency: N must be >= 1");
+    memo_begin();
     var tgt = 0; var k = 0;
     while (k < N) { rl_rollout(p); if (reason_answer() == REASON_TGT()) { tgt = tgt + 1; } k = k + 1; }
+    memo_end();
     if (tgt * 2 >= N) { return REASON_TGT(); }
     return REASON_DECOY();
 }
@@ -60,6 +70,7 @@ fn reason_self_consistency(p, N): i64 {
 # samples — the fairness control). method: 0 single-sample, 1 self-consistency.
 fn reason_accuracy(method, N, nprompts, base_seed): i64 {
     guard((N >= 1) && (nprompts >= 1), "reason_accuracy: N and nprompts must be >= 1");
+    memo_begin();
     rng_seed(base_seed);
     var prompts = t_alloc(nprompts);
     var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
@@ -74,6 +85,7 @@ fn reason_accuracy(method, N, nprompts, base_seed): i64 {
         if (ans == reason_oracle(p)) { ok = ok + 1; }
         i = i + 1;
     }
+    memo_end();
     return (ok * 1000) / nprompts;                            # per-mille (random = 500)
 }
 
@@ -85,6 +97,7 @@ fn reason_accuracy(method, N, nprompts, base_seed): i64 {
 # sample and approach the oracle. Returns mean reward × 100 (of T=16).
 fn reason_best_of_n(mode, N, nprompts, base_seed): i64 {
     guard((N >= 1) && (nprompts >= 1), "reason_best_of_n: N and nprompts must be >= 1");
+    memo_begin();
     rng_seed(base_seed);
     var prompts = t_alloc(nprompts);
     var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }
@@ -111,12 +124,19 @@ fn reason_best_of_n(mode, N, nprompts, base_seed): i64 {
         else { total = f64_add(total, tr_o); }
         i = i + 1;
     }
+    memo_end();
     return f64_to(f64_mul(f64_div(total, f64_from(nprompts)), f64_from(100)));   # mean reward × 100
 }
 
 # verifier-usefulness gate: does the PRM score correlate with answer-correctness?
 # returns 1 if mean rm_score(correct rollouts) > mean rm_score(wrong rollouts).
 fn reason_verifier_gate(n): i64 {
+    memo_begin();
+    var r = _reason_verifier_gate(n);
+    memo_end();
+    return r;
+}
+fn _reason_verifier_gate(n): i64 {
     rng_seed(12345);
     var sc = f64_from(0); var nc = 0; var sw = f64_from(0); var nw = 0; var k = 0;
     while (k < n) {
@@ -126,7 +146,7 @@ fn reason_verifier_gate(n): i64 {
         else { sw = f64_add(sw, s); nw = nw + 1; }
         k = k + 1;
     }
-    if ((nc == 0) || (nw == 0)) { return 1; }
+    if ((nc == 0) || (nw == 0)) { return 0; }          # one class empty: nothing to compare, no pass
     if (f64_gt(f64_div(sc, f64_from(nc)), f64_div(sw, f64_from(nw))) == 1) { return 1; }
     return 0;
 }

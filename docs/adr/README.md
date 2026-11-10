@@ -19,4 +19,7 @@ Decisions about tarka — what we chose, the context, and the consequences we ac
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+| ADR | Title | Status |
+|---|---|---|
+| [0001](0001-tarka-scope-and-rl-migration.md) | tarka scope and the attn11 RL-migration boundary | Accepted |
+| [0002](0002-optimizations-preserve-bits.md) | Refactors and optimizations preserve every bit | Accepted |

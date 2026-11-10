@@ -5,6 +5,20 @@
 
 ## Version
 
+**1.2.2** — 2026-11-09. **P(-1) sweep: audit, refactor, hardening, optimization, repairs**
+([`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md)). Toolchain and deps unchanged
+(6.7.18; tyche 1.2.2 / rosnet 1.4.1 / akshara 1.1.2). **One HIGH fixed**: `--pref` built its vocab
+over the raw file, so an escape-decoded byte (`\t`, `\r`, a lone-line `\n`) had id −1 and indexed
+the policy's tensors at −1 (a write into `P_b`); the vocab now covers decoded bytes and a byte
+without an id refuses the row. Seven MEDIUM (`--pref`: over-cap truncation, lenient labels,
+unchecked field types, wrong `\u`/`\b`/`\f` decoding; the IPO/KTO gate not counted;
+`ipo_mean_h` scoring ties — h 0.59 → 0.85; CI ran no gate) and ten LOW, all fixed. Refactors (one
+seed / softmax / Adam kernel, `ppo_update`, `grpo_collect`/`grpo_update`) and a per-state
+distribution memo keep every bit (golden gate, x86_64 + aarch64): demo **3,495 → 986 ms**, DPO /
+KTO steps 4.2× / 4.8×. Tests 73 → **190** assertions in four suites (+ 13 abort probes, a 4,000-round
+fuzz harness, 15 benchmarks); 17-mutant run, all killed. CI now runs the demo, `--pref`, the
+probes, bench, fuzz, fmt/lint/vet/doc gates and an aarch64 job.
+
 **1.2.1** — 2026-11-09. **Realign to the latest releases, plus the deprecated-getter migration.** Pin `6.7.9` → `6.7.18`;
 tyche 1.2.0 → **1.2.2**, rosnet 1.2.0 → **1.4.1**, akshara 1.1.0 → **1.1.2** (each bit-identical on valid
 input; akshara still pins rosnet 1.2.2, and the two rosnet functions it calls, `t_alloc` and `t_zero`,
@@ -168,6 +182,14 @@ stub (`src/test.cyr`), so the runner reports 3 files; `cyrius test tests` runs t
   accuracy from orderings only; fresh policy on each frozen reward reaches **PRM 15.54 /
   ORM 13.64 (of 16)** true reward — process supervision wins.
 
+**Shared kernels + the distribution memo — 1.2.2:** every policy gradient ends in `pol_seed_bwd`
+(`src/rl.cyr`), every softmax in `softmax_into`, every Adam step in `adam_kernel`; PPO in
+`ppo_update`, GRPO in `grpo_collect` / `grpo_update`. Inside tarka's training and evaluation loops
+the policy's, the reference's and the reward model's per-state outputs are computed once per
+parameter version (`memo_begin` / `memo_end`;
+[architecture note 001](../architecture/001-distribution-memo.md)). Bits unchanged
+([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
+
 **Verifier-guided reasoning — complete (deliberation 0.5.0, tree search 0.7.0):**
 - `src/reasoning.cyr` — inference-time deliberation on the trained policy + reward-model verifier
   (no extra training). Reasoning task = checkable answer over a parity chain; policy made
@@ -179,16 +201,33 @@ stub (`src/test.cyr`), so the runner reports 3 files; `cyrius test tests` runs t
   task (generate a TARGET token the policy never favors). Matched compute: greedy 0.20 /
   best-of-N 4.05 / **beam 13.50** of 16 — beam 3.3× best-of-N, 67× greedy. Search is necessary.
 
+**Alignment — 1.1.x:**
+- `src/dpo.cyr` — frozen reference policy (`dpo_snapshot`), **DPO** (target freq 0.94 → 24.00),
+  the RLHF **KL-to-reference** penalty (`kl_penalty_step`; mean KL 3.33 → 2.46).
+- `src/preference_ext.cyr` — **IPO** (h 0.00 → 0.85 toward 1.00) and **KTO** (ρ +80.31 / −138.27).
+- `src/pref_ingest.cyr` — `tarka --pref <file>`: validating two-pass JSONL ingestion of an ifran
+  `pref export` (one JSON object per line, strict kinds and labels, RFC 8259 escapes, vocab over
+  decoded bytes, 1 MB / 256-row / 48-pair caps, nine counted skip reasons) → DPO / IPO / KTO,
+  gated. `src/report.cyr` — the printers it shares with the demo.
+
 ## Tests
 
-- `tests/tarka.tcyr` — **grad-check suite, 50/50 green** (M1: 4; M2: +15 — critic dW/db/dE
+**190 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
+- `tests/tarka.tcyr` — **grad-check suite, 50** (M1: 4; M2: +15 — critic dW/db/dE
   FD-exact; GAE recursion==explicit + return identity; PPO ρ=1==REINFORCE / unclipped FD
   3e-9 / binding-clip→0; GRPO group-norm anchors + ratio=1==REINFORCE; M3: +5 — RM
   dWr/dbr/dEr Bradley-Terry FD-exact + descent-direction falsifier; 1.1.0: +10 — DPO +
   KL penalty; 1.1.1: +16 — IPO + KTO).
-- `tests/pref_ingest.tcyr` — **preference-file ingestion, 23/23 green** (1.1.2). Suite total **73**.
-- `tests/tarka.bcyr` — benchmark stub (compiles)
-- `tests/tarka.fcyr` — fuzz stub (compiles)
+- `tests/pref_ingest.tcyr` — **preference-file ingestion, 88** (1.1.2: 23; 1.2.2: +65 — escape
+  bytes tokenize, raw-vocab refusal, the full escape set, strict labels, field types and line
+  structure, identical spans, the row cap and skip counts, KTO class sizes).
+- `tests/units.tcyr` — **38** (1.2.2): the memo's invalidation rules, parity / reasoning / search
+  helpers, beam(1,1) == best-of-1, GAE normalization, GRPO's equal group, buffer re-sizing.
+- `tests/golden.tcyr` — **14** (1.2.2): FNV-1a digests of every trainer's bits, per target.
+- `tests/abort/` — 13 guard probes (each must exit 1 with the guard's message; run by CI).
+- `tests/tarka.fcyr` — seeded `--pref` fuzz harness, 5 properties × 4,000 rounds (~1.2 s).
+- `tests/tarka.bcyr` — 15 benchmarks; `scripts/bench-history.sh` → `bench-history.csv`.
+- Reference coverage (`cyrius coverage`): 132 / 208 functions; the demo, run by CI, exercises the rest.
 
 Grad-check discipline (every hand-derived backward verified against central finite
 differences before it lands, inherited from attn11) is **active as of M1**.
@@ -225,6 +264,9 @@ is the eventual downstream.)
 
 The reference is complete. Natural next levers (post-1.0, user-driven): a `--gpu` backend
 (rosnet-gpu + mabda), MCTS on a task that warrants it, or extracting reusable primitives to a
-shared lib (the rosnet/tyche/akshara pattern) once a second consumer appears.
+shared lib (the rosnet/tyche/akshara pattern) once a second consumer appears. From the 1.2.2
+audit, each a labeled behavior change (they move bits): a per-state aggregated backward
+(`linear_bwd` now dominates a training step), and a two-length DPO / IPO primitive so a pair is
+scored at each side's own length rather than the shared minimum.
 
 See [`roadmap.md`](roadmap.md).

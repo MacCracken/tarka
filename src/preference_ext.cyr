@@ -39,7 +39,8 @@
 
 # ============================ IPO ============================================
 
-fn IPO_BETA(): i64 { return f64_div(f64_from(1), f64_from(2)); }   # 0.5 → target margin 1/(2β)=1.0
+# 0.5 → target margin 1/(2β)=1.0
+fn IPO_BETA(): i64 { return f64_div(f64_from(1), f64_from(2)); }
 
 # IPO target margin m = 1/(2β).
 fn ipo_target(beta): i64 { return f64_div(f64_from(1), f64_mul(f64_from(2), beta)); }
@@ -70,55 +71,67 @@ fn ipo_backward_pair(stW, acW, stL, acL, n, beta): i64 {
 }
 
 # ---- IPO training loop (demo) — mirrors dpo_train, squared-margin instead of −lnσ.
-var IA_st = 0; var IA_ac = 0; var IB_st = 0; var IB_ac = 0;
-fn ipo_bufs(): i64 {
-    if (IA_st == 0) { IA_st = t_alloc(g_T); IA_ac = t_alloc(g_T); IB_st = t_alloc(g_T); IB_ac = t_alloc(g_T); }
-    return 0;
-}
+# Samples into dpo.cyr's slot buffers (DA_* / DB_*).
 fn ipo_train(steps, batch, lr): i64 {
-    ipo_bufs();
+    guard(batch >= 1, "ipo_train: batch must be >= 1");
+    memo_begin();
+    dpo_bufs();
     var invB = f64_div(f64_from(1), f64_from(batch));
     var s = 0;
     while (s < steps) {
         pol_zero_grads();
         var used = 0; var nb = 0;
         while (nb < batch) {
-            dpo_sample_to(IA_st, IA_ac); dpo_sample_to(IB_st, IB_ac);
-            var ra = dpo_count_target(IA_ac); var rb = dpo_count_target(IB_ac);
-            if (f64_gt(ra, rb) == 1) { ipo_backward_pair(IA_st, IA_ac, IB_st, IB_ac, g_T, IPO_BETA()); used = used + 1; }
-            elif (f64_gt(rb, ra) == 1) { ipo_backward_pair(IB_st, IB_ac, IA_st, IA_ac, g_T, IPO_BETA()); used = used + 1; }
+            dpo_sample_to(DA_st, DA_ac); dpo_sample_to(DB_st, DB_ac);
+            var ra = dpo_count_target(DA_ac); var rb = dpo_count_target(DB_ac);
+            if (f64_gt(ra, rb) == 1) {
+                ipo_backward_pair(DA_st, DA_ac, DB_st, DB_ac, g_T, IPO_BETA()); used = used + 1;
+            } elif (f64_gt(rb, ra) == 1) {
+                ipo_backward_pair(DB_st, DB_ac, DA_st, DA_ac, g_T, IPO_BETA()); used = used + 1;
+            }
             # tie → no preference signal this slot
             nb = nb + 1;
         }
         if (used > 0) {
-            t_scale(G_E, g_V * g_D, invB); t_scale(G_W, g_D * g_V, invB); t_scale(G_b, g_V, invB);
+            pol_scale_grads(invB);
             pol_adam_step(lr);
         }
         s = s + 1;
     }
+    memo_end();
     return 0;
 }
 
-# mean IPO margin h over n fresh on-policy pairs (winner = higher target count) — the
-# convergence metric (should approach the target margin 1/(2β)).
+# mean IPO margin h over the preference pairs among `npairs` fresh on-policy draws of two
+# rollouts (winner = higher target count) — the convergence metric, which should approach
+# the target margin 1/(2β). A tie has no winner and is skipped, as ipo_train skips it
+# (1.2.1 scored a tie with an arbitrary winner, which pulled the mean toward 0). 0 when
+# every draw ties.
 fn ipo_mean_h(npairs): i64 {
-    ipo_bufs();
-    var sum = f64_from(0); var k = 0;
+    guard(npairs >= 1, "ipo_mean_h: npairs must be >= 1");
+    memo_begin();
+    dpo_bufs();
+    var sum = f64_from(0); var used = 0; var k = 0;
     while (k < npairs) {
-        dpo_sample_to(IA_st, IA_ac); dpo_sample_to(IB_st, IB_ac);
-        var ra = dpo_count_target(IA_ac); var rb = dpo_count_target(IB_ac);
-        if (f64_gt(ra, rb) == 1) { sum = f64_add(sum, ipo_h(IA_st, IA_ac, IB_st, IB_ac, g_T)); }
-        else { sum = f64_add(sum, ipo_h(IB_st, IB_ac, IA_st, IA_ac, g_T)); }
+        dpo_sample_to(DA_st, DA_ac); dpo_sample_to(DB_st, DB_ac);
+        var ra = dpo_count_target(DA_ac); var rb = dpo_count_target(DB_ac);
+        if (f64_gt(ra, rb) == 1) { sum = f64_add(sum, ipo_h(DA_st, DA_ac, DB_st, DB_ac, g_T)); used = used + 1; }
+        elif (f64_gt(rb, ra) == 1) { sum = f64_add(sum, ipo_h(DB_st, DB_ac, DA_st, DA_ac, g_T)); used = used + 1; }
         k = k + 1;
     }
-    return f64_div(sum, f64_from(npairs));
+    memo_end();
+    if (used == 0) { return f64_from(0); }
+    return f64_div(sum, f64_from(used));
 }
 
 # ============================ KTO ============================================
 
-fn KTO_BETA(): i64 { return f64_div(f64_from(1), f64_from(10)); }   # 0.1
-fn KTO_LAMBDA_D(): i64 { return f64_from(1); }                      # desirable weight 1.0
-fn KTO_LAMBDA_U(): i64 { return f64_from(1); }                      # undesirable weight 1.0
+# 0.1
+fn KTO_BETA(): i64 { return f64_div(f64_from(1), f64_from(10)); }
+# desirable weight 1.0
+fn KTO_LAMBDA_D(): i64 { return f64_from(1); }
+# undesirable weight 1.0
+fn KTO_LAMBDA_U(): i64 { return f64_from(1); }
 
 # bare log-ratio ρ = log π_θ(y) − log π_ref(y) for one stored sequence (NO β — β
 # enters once, outside, in u = β(ρ − z); reusing dpo_delta here would double-count β).
@@ -137,6 +150,7 @@ fn kto_zref_raw(kl_st, kl_ac, n, m): i64 {
     }
     return f64_div(sum, f64_from(m));
 }
+# the detached reference point: kto_zref_raw clamped >= 0
 fn kto_zref(kl_st, kl_ac, n, m): i64 {
     var z = kto_zref_raw(kl_st, kl_ac, n, m);
     if (f64_lt(z, f64_from(0)) == 1) { return f64_from(0); }   # clamp ≥ 0 (detached anyway)
@@ -189,15 +203,21 @@ fn kto_backward_example(states, actions, n, label, beta, lamD, lamU, z): i64 {
 # batch mean, compute the detached reference point z ONCE for the batch, then run the
 # per-example gradient. Desirable continuations are pushed up, undesirable down.
 var KA_st = 0; var KA_ac = 0; var KA_cnt = 0;
+var KA_T = 0;                                 # the g_T the batch buffers were sized for
+# the largest kto_train batch
 fn KTO_BMAX(): i64 { return 64; }
+# (re)size the batch buffers to KTO_BMAX × g_T
 fn kto_bufs(): i64 {
-    if (KA_st == 0) {
+    if (KA_T != g_T) {
         KA_st = t_alloc(KTO_BMAX() * g_T); KA_ac = t_alloc(KTO_BMAX() * g_T); KA_cnt = t_alloc(KTO_BMAX());
+        KA_T = g_T;
     }
     return 0;
 }
+# unpaired KTO: label each rollout by its count against the batch mean, one detached z per batch, one Adam step
 fn kto_train(steps, batch, lr): i64 {
-    guard(batch <= KTO_BMAX(), "kto_train: batch exceeds KTO_BMAX");
+    guard((batch >= 1) && (batch <= KTO_BMAX()), "kto_train: batch out of range (1..KTO_BMAX)");
+    memo_begin();
     kto_bufs();
     var invB = f64_div(f64_from(1), f64_from(batch));
     var s = 0;
@@ -231,10 +251,11 @@ fn kto_train(steps, batch, lr): i64 {
               KTO_BETA(), KTO_LAMBDA_D(), KTO_LAMBDA_U(), z);
             bi = bi + 1;
         }
-        t_scale(G_E, g_V * g_D, invB); t_scale(G_W, g_D * g_V, invB); t_scale(G_b, g_V, invB);
+        pol_scale_grads(invB);
         pol_adam_step(lr);
         s = s + 1;
     }
+    memo_end();
     return 0;
 }
 
@@ -242,7 +263,7 @@ fn kto_train(steps, batch, lr): i64 {
 # demo metric (desirable mean ρ should rise above undesirable mean ρ after training).
 # want_desirable != 0 selects above-threshold rollouts, else below.
 fn kto_mean_rho(n, thresh, want_desirable): i64 {
-    kto_bufs();
+    memo_begin();
     var sum = f64_from(0); var cnt = 0; var k = 0;
     while (k < n) {
         rl_rollout(rl_prompt());
@@ -254,6 +275,7 @@ fn kto_mean_rho(n, thresh, want_desirable): i64 {
         }
         k = k + 1;
     }
+    memo_end();
     if (cnt == 0) { return f64_from(0); }
     return f64_div(sum, f64_from(cnt));
 }

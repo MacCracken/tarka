@@ -1,9 +1,10 @@
 # tarka — top-level test entry (referenced by cyrius.cyml [build].test).
-# For unit tests, prefer adding cases to tests/tarka.tcyr.
+# The suites themselves are tests/*.tcyr (bare `cyrius test` runs this stub and them).
 
 include "lib/syscalls.cyr"
 
-fn main() {
+# the [build].test entry: a stub (the suites are tests/*.tcyr)
+fn main(): i64 {
     return 0;
 }
 

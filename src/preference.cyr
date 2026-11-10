@@ -12,9 +12,12 @@
 # the per-(state,action) reward — true process supervision, not a uniform outcome reward.
 # Include after bench_m2.cyr + m3.cyr.
 
-fn RUNI(): i64 { return rng_u64() & 0x7FFFFFFFFFFFFFFF; }       # nonneg random i64
-fn par_correct(x): i64 { if ((x & 1) == 0) { return g_target; } return g_decoy; }   # TGT even / DECOY odd
-fn par_wrong(x): i64 {                                          # any action that is NOT parity-correct
+# nonneg random i64
+fn RUNI(): i64 { return rng_u64() & 0x7FFFFFFFFFFFFFFF; }
+# TGT even / DECOY odd
+fn par_correct(x): i64 { if ((x & 1) == 0) { return g_target; } return g_decoy; }
+# any action that is NOT parity-correct
+fn par_wrong(x): i64 {
     guard(g_V >= 2, "par_wrong: g_V must be >= 2 (rejection loop would not terminate)");
     var c = par_correct(x);
     var a = RUNI() % g_V;
@@ -26,7 +29,10 @@ fn par_wrong(x): i64 {                                          # any action tha
 # Each pair: winner = (x, parity-correct action), loser = (x, wrong action). Labels come
 # from parity-correctness only — the RM never sees the numeric reward. n=1 (single step).
 var W1 = 0; var W2 = 0; var L1 = 0; var L2 = 0;
+# train the PRM from `steps` batches of step-level parity preferences: winner (x, correct) over loser (x, wrong)
 fn rm_train_prm(steps, batch, lr): i64 {
+    guard(batch >= 1, "rm_train_prm: batch must be >= 1");
+    memo_begin();
     if (W1 == 0) { W1 = t_alloc(1); W2 = t_alloc(1); L1 = t_alloc(1); L2 = t_alloc(1); }
     var invB = f64_div(f64_from(1), f64_from(batch));
     var s = 0;
@@ -40,22 +46,25 @@ fn rm_train_prm(steps, batch, lr): i64 {
             rm_backward_pair(W1, W2, L1, L2, 1);
             bi = bi + 1;
         }
-        t_scale(G_Er, g_V*g_D, invB); t_scale(G_Wr, g_D*g_V, invB); t_scale(G_br, g_V, invB);
+        rm_scale_grads(invB);
         rm_adam_step(lr);
         s = s + 1;
     }
+    memo_end();
     return 0;
 }
 
 # held-out PRM preference accuracy (out of n): fraction of fresh (x,correct)≻(x,wrong)
 # pairs the FROZEN r_θ ranks correctly. Random = 50%; the RM never trained on these.
 fn rm_prm_accuracy(n): i64 {
+    memo_begin();
     var ok = 0; var k = 0;
     while (k < n) {
         var x = RUNI() % g_V;
         if (f64_gt(rm_reward(x, par_correct(x)), rm_reward(x, par_wrong(x))) == 1) { ok = ok + 1; }
         k = k + 1;
     }
+    memo_end();
     return ok;
 }
 
@@ -65,19 +74,14 @@ fn rm_prm_fill(): i64 {                                        # R_rewards[t] = 
     while (t < g_T) { store64(R_rewards + t*8, rm_reward(load64(R_states+t*8), load64(R_actions+t*8))); t = t + 1; }
     return 0;
 }
-fn rm_ppo_step(epochs, lr): i64 {                              # PPO using the learned PRM reward (RM frozen)
-    var invT = f64_div(f64_from(1), f64_from(g_T));
+# PPO using the learned PRM reward (RM frozen)
+fn rm_ppo_step(epochs, lr): i64 {
+    ac_ready("rm_ppo_step: call ac_init() after pol_init()");
+    memo_begin();
     rl_rollout(rl_prompt());
     rm_prm_fill(); gae_values(); gae_advantages(); gae_normalize();
-    ppo_snapshot();
-    var e = 0;
-    while (e < epochs) {
-        pol_zero_grads(); val_zero_grads();
-        ppo_backward(); critic_backward(VAL_COEF());
-        ac_scale_grads(invT);
-        pol_adam_step(lr); critic_adam_step(lr);
-        e = e + 1;
-    }
+    ppo_update(epochs, lr);
+    memo_end();
     return 1;
 }
 
@@ -87,11 +91,17 @@ fn rm_ppo_step(epochs, lr): i64 {                              # PPO using the l
 # terminal score R(τ)=Σ_t r_θ — a SPARSE signal the critic/GAE must propagate back.
 # Contrast with PRM's DENSE per-step reward (process supervision; Lightman 2023).
 var OA_st = 0; var OA_ac = 0; var OB_st = 0; var OB_ac = 0;
+var OAB_T = 0;                                                 # the g_T the four buffers were sized for
+# (re)size the rollout-pair buffers to g_T
 fn orm_bufs(): i64 {
-    if (OA_st == 0) { OA_st = t_alloc(g_T); OA_ac = t_alloc(g_T); OB_st = t_alloc(g_T); OB_ac = t_alloc(g_T); }
+    if (OAB_T != g_T) {
+        OA_st = t_alloc(g_T); OA_ac = t_alloc(g_T); OB_st = t_alloc(g_T); OB_ac = t_alloc(g_T);
+        OAB_T = g_T;
+    }
     return 0;
 }
-fn rm_sample_to(dst_st, dst_ac): i64 {                         # one rollout -> stored buffers
+# one rollout -> stored buffers
+fn rm_sample_to(dst_st, dst_ac): i64 {
     rl_rollout(rl_prompt());
     var t = 0;
     while (t < g_T) {
@@ -100,12 +110,16 @@ fn rm_sample_to(dst_st, dst_ac): i64 {                         # one rollout -> 
     }
     return 0;
 }
-fn par_true_reward(st, ac): i64 {                                   # true parity reward of a stored rollout
+# true parity reward of a stored rollout
+fn par_true_reward(st, ac): i64 {
     var s = f64_from(0); var t = 0;
     while (t < g_T) { s = f64_add(s, par_rw(load64(st + t*8), load64(ac + t*8))); t = t + 1; }
     return s;
 }
+# train the ORM from whole-rollout preferences (the higher true parity reward wins; a tie is skipped)
 fn rm_train_orm(steps, batch, lr): i64 {
+    guard(batch >= 1, "rm_train_orm: batch must be >= 1");
+    memo_begin();
     orm_bufs();
     var invB = f64_div(f64_from(1), f64_from(batch));
     var s = 0;
@@ -120,14 +134,21 @@ fn rm_train_orm(steps, batch, lr): i64 {
             # tie -> no preference signal this slot
             bi = bi + 1;
         }
-        t_scale(G_Er, g_V*g_D, invB); t_scale(G_Wr, g_D*g_V, invB); t_scale(G_br, g_V, invB);
+        rm_scale_grads(invB);
         rm_adam_step(lr);
         s = s + 1;
     }
+    memo_end();
     return 0;
 }
 # held-out ORM rollout-pair ranking accuracy (ties excluded from the count).
 fn rm_orm_accuracy(n): i64 {
+    memo_begin();
+    var r = _rm_orm_accuracy(n);
+    memo_end();
+    return r;
+}
+fn _rm_orm_accuracy(n): i64 {
     orm_bufs();
     var ok = 0; var cnt = 0; var k = 0;
     while (k < n) {
@@ -153,19 +174,14 @@ fn rm_orm_fill(): i64 {
     store64(R_rewards + (g_T - 1)*8, R);
     return 0;
 }
+# one PPO step against the ORM's sparse terminal reward (RM frozen)
 fn rm_orm_ppo_step(epochs, lr): i64 {
-    var invT = f64_div(f64_from(1), f64_from(g_T));
+    ac_ready("rm_orm_ppo_step: call ac_init() after pol_init()");
+    memo_begin();
     rl_rollout(rl_prompt());
     rm_orm_fill(); gae_values(); gae_advantages(); gae_normalize();
-    ppo_snapshot();
-    var e = 0;
-    while (e < epochs) {
-        pol_zero_grads(); val_zero_grads();
-        ppo_backward(); critic_backward(VAL_COEF());
-        ac_scale_grads(invT);
-        pol_adam_step(lr); critic_adam_step(lr);
-        e = e + 1;
-    }
+    ppo_update(epochs, lr);
+    memo_end();
     return 1;
 }
 
@@ -175,23 +191,16 @@ fn rm_orm_ppo_step(epochs, lr): i64 {
 # rollouts consumed.
 fn rm_orm_grpo_step(G, lr): i64 {
     guard((G >= 1) && (G <= GMAX()), "rm_orm_grpo_step: group size G out of range (1..GMAX)");
-    var invN = f64_div(f64_from(1), f64_from(G * g_T));
+    ac_ready("rm_orm_grpo_step: call ac_init() after pol_init()");
+    memo_begin();
     var g = 0;
     while (g < G) {
         rl_rollout(rl_prompt());
-        var t = 0;
-        while (t < g_T) {
-            var base = (g*g_T + t)*8;
-            var xt = load64(R_states + t*8); var at = load64(R_actions + t*8);
-            store64(GR_states + base, xt); store64(GR_actions + base, at);
-            pol_logits(xt); pol_softmax();
-            store64(GR_oldlp + base, f64_ln(load64(S_probs + at*8)));
-            t = t + 1;
-        }
+        grpo_collect(g);
         store64(GR_R + g*8, rm_score(R_states, R_actions, g_T));   # LEARNED outcome reward
         g = g + 1;
     }
-    grpo_group_adv(G);
-    pol_zero_grads(); grpo_backward(G, invN); pol_adam_step(lr);
+    grpo_update(G, lr);
+    memo_end();
     return G;
 }

@@ -28,21 +28,41 @@
 #
 # Include AFTER rl.cyr (pol_*, S_*, P_*, g_V/g_D) + reward.cyr (sigma_stable, bt_loss).
 
-fn DPO_BETA(): i64 { return f64_div(f64_from(1), f64_from(10)); }     # 0.1 (Rafailov default)
+# 0.1 (Rafailov default)
+fn DPO_BETA(): i64 { return f64_div(f64_from(1), f64_from(10)); }
 
 # ---- frozen reference policy (a snapshot of P_E/P_W/P_b) ---------------------
 var P_Eref = 0; var P_Wref = 0; var P_bref = 0;
 var S_reflogits = 0;   # V   reference forward logits
 var S_refprobs  = 0;   # V   softmax(reference logits)
+# the reference's per-state distribution cache, on rl.cyr's memo-region rules (bumped by
+# dpo_init and dpo_snapshot, retired on entering the outermost region)
+var RF_probs = 0;      # V*V cached pi_ref(.|x), row x
+var RF_stamp = 0;      # V   the RF_epoch row x was filled at (0 = never)
+var RF_epoch = 0;
+var RF_seen = 0;
+var DI_V = 0; var DI_D = 0;   # the dims dpo_init sized the reference for
 
+# the reference's buffers must match the policy's dims: dpo_snapshot copies V*D values
+fn dpo_ready(who): i64 {
+    guard((DI_V == g_V) && (DI_D == g_D), who);
+    return 0;
+}
+
+# allocate the frozen reference policy and its cache for the current dims (call after pol_init)
 fn dpo_init(): i64 {
     P_Eref = t_alloc(g_V * g_D); P_Wref = t_alloc(g_D * g_V); P_bref = t_alloc(g_V);
     S_reflogits = t_alloc(g_V); S_refprobs = t_alloc(g_V);
+    RF_probs = t_alloc(g_V * g_V); RF_stamp = t_alloc(g_V); t_zero(RF_stamp, g_V);
+    RF_epoch = RF_epoch + 1;
+    DI_V = g_V; DI_D = g_D;
     return 0;
 }
 
 # freeze the CURRENT policy as the reference (call once, before DPO / KL-penalty training)
 fn dpo_snapshot(): i64 {
+    dpo_ready("dpo_snapshot: call dpo_init() after pol_init()");
+    RF_epoch = RF_epoch + 1;                 # the reference changes: retire cached rows
     t_copy(P_Eref, P_E, g_V * g_D);
     t_copy(P_Wref, P_W, g_D * g_V);
     t_copy(P_bref, P_b, g_V);
@@ -51,37 +71,40 @@ fn dpo_snapshot(): i64 {
 
 # reference logits/softmax — mirrors pol_logits/pol_softmax on the frozen params.
 fn ref_logits(x): i64 {
+    dpo_ready("ref_logits: call dpo_init() after pol_init()");
+    guard((x >= 0) && (x < g_V), "ref_logits: state token out of range (0..V-1)");
     linear_fwd(P_Eref + x * g_D * 8, P_Wref, P_bref, S_reflogits, 1, g_D, g_V);
     return 0;
 }
-fn ref_softmax(): i64 {
-    var mx = load64(S_reflogits);
-    var v = 1;
-    while (v < g_V) {
-        var lv = load64(S_reflogits + v * 8);
-        if (f64_gt(lv, mx) == 1) { mx = lv; }
-        v = v + 1;
-    }
-    var sum = f64_from(0);
-    v = 0;
-    while (v < g_V) {
-        var e = f64_exp(f64_sub(load64(S_reflogits + v * 8), mx));
-        store64(S_refprobs + v * 8, e);
-        sum = f64_add(sum, e);
-        v = v + 1;
-    }
-    var inv = f64_div(f64_from(1), sum);
-    v = 0;
-    while (v < g_V) {
-        store64(S_refprobs + v * 8, f64_mul(load64(S_refprobs + v * 8), inv));
-        v = v + 1;
-    }
+# softmax(S_reflogits) -> S_refprobs
+fn ref_softmax(): i64 { return softmax_into(S_reflogits, S_refprobs); }
+
+# S_refprobs = pi_ref(.|x): computed, or inside a memo region copied from the cache.
+fn ref_dist(x): i64 {
+    if (g_memo_depth == 0) { ref_logits(x); ref_softmax(); return 0; }
+    dpo_ready("ref_dist: call dpo_init() after pol_init()");
+    guard((x >= 0) && (x < g_V), "ref_dist: state token out of range (0..V-1)");
+    if (RF_seen != g_memo_gen) { RF_epoch = RF_epoch + 1; RF_seen = g_memo_gen; }
+    var row = RF_probs + x * g_V * 8;
+    if (load64(RF_stamp + x * 8) == RF_epoch) { t_copy(S_refprobs, row, g_V); return 0; }
+    ref_logits(x); ref_softmax();
+    t_copy(row, S_refprobs, g_V);
+    store64(RF_stamp + x * 8, RF_epoch);
     return 0;
 }
 
 # log π_θ(a|x) and log π_ref(a|x) for one (state, action).
-fn pol_logp(x, a): i64 { pol_logits(x); pol_softmax(); return f64_ln(load64(S_probs + a * 8)); }
-fn ref_logp(x, a): i64 { ref_logits(x); ref_softmax(); return f64_ln(load64(S_refprobs + a * 8)); }
+fn pol_logp(x, a): i64 {
+    guard((a >= 0) && (a < g_V), "pol_logp: action token out of range (0..V-1)");
+    pol_dist(x);
+    return f64_ln(load64(S_probs + a * 8));
+}
+# ln pi_ref(a|x) for one (state, action)
+fn ref_logp(x, a): i64 {
+    guard((a >= 0) && (a < g_V), "ref_logp: action token out of range (0..V-1)");
+    ref_dist(x);
+    return f64_ln(load64(S_refprobs + a * 8));
+}
 
 # Σ_{t<n} log π over a stored (states, actions) sequence — θ and reference variants.
 fn dpo_seqlogp_theta(states, actions, n): i64 {
@@ -89,6 +112,7 @@ fn dpo_seqlogp_theta(states, actions, n): i64 {
     while (t < n) { lp = f64_add(lp, pol_logp(load64(states + t*8), load64(actions + t*8))); t = t + 1; }
     return lp;
 }
+# Σ_{t<n} ln pi_ref over a stored (states, actions) sequence
 fn dpo_seqlogp_ref(states, actions, n): i64 {
     var lp = f64_from(0); var t = 0;
     while (t < n) { lp = f64_add(lp, ref_logp(load64(states + t*8), load64(actions + t*8))); t = t + 1; }
@@ -109,23 +133,15 @@ fn dpo_pair_loss(stW, acW, stL, acL, n, beta): i64 {
     return bt_loss(dpo_delta(stW, acW, stL, acL, n, beta), f64_from(0));
 }
 
-# accumulate one sequence's scaled policy gradient into G_* — the rl.cyr softmax-CE
-# seed (probs − onehot)·scale over rosnet's linear_bwd (no loss return; DPO drives
-# its own scale). Identical body to rl_backward, parameterized over (states,actions,n).
+# accumulate one sequence's scaled policy gradient into G_*: rl.cyr's seed kernel
+# pol_seed_bwd (probs − onehot)·scale at every step (no loss return; DPO drives its
+# own scale). rl_backward's body, parameterized over (states, actions, n).
 fn pol_accum_scaled(states, actions, n, scale): i64 {
     var t = 0;
     while (t < n) {
         var x = load64(states + t * 8);
-        var a = load64(actions + t * 8);
-        pol_logits(x); pol_softmax();
-        store64(S_probs + a * 8, f64_sub(load64(S_probs + a * 8), f64_from(1)));   # probs − onehot(a)
-        var v = 0;
-        while (v < g_V) {
-            store64(S_probs + v * 8, f64_mul(load64(S_probs + v * 8), scale));
-            v = v + 1;
-        }
-        linear_bwd(P_E + x * g_D * 8, P_W, S_probs, S_demb, G_W, G_b, 1, g_D, g_V);
-        t_add_into(G_E + x * g_D * 8, S_demb, g_D);
+        pol_dist(x);
+        pol_seed_bwd(x, load64(actions + t * 8), scale);
         t = t + 1;
     }
     return 0;
@@ -147,8 +163,8 @@ fn dpo_backward_pair(stW, acW, stL, acL, n, beta): i64 {
 # ---- RLHF KL-to-reference-policy penalty -------------------------------------
 # KL(π_θ(·|x) ‖ π_ref(·|x)) at one state. Side effect: S_probs = p (θ), S_refprobs = q (ref).
 fn kl_div_at(x): i64 {
-    pol_logits(x); pol_softmax();        # S_probs   = p
-    ref_logits(x); ref_softmax();        # S_refprobs = q
+    pol_dist(x);                         # S_probs   = p
+    ref_dist(x);                         # S_refprobs = q
     var kl = f64_from(0); var j = 0;
     while (j < g_V) {
         var pj = load64(S_probs + j * 8);
@@ -180,17 +196,37 @@ fn kl_backward_state(x, beta): i64 {
     return 0;
 }
 
+# One optimizer step of the KL-to-reference penalty alone: accumulate β·KL(π_θ‖π_ref)'s
+# gradient at every state, mean it over the V states, Adam step. Pulls a diverged
+# policy back toward the reference (the demo's KL-penalty phase).
+fn kl_penalty_step(beta, lr): i64 {
+    pol_zero_grads();
+    var j = 0;
+    while (j < g_V) { kl_backward_state(j, beta); j = j + 1; }
+    pol_scale_grads(f64_div(f64_from(1), f64_from(g_V)));
+    pol_adam_step(lr);
+    return 0;
+}
+
 # ---- DPO training loop (demo) ------------------------------------------------
 # DPO needs only PREFERENCES — no learned reward model, no value critic, no
 # sampler-in-the-loop reward. Each step samples two on-policy rollouts, labels the
 # higher-target-count one the winner, and runs the direct-preference gradient. The
 # policy moves toward preferred continuations while the frozen reference KL-anchors
 # it. Mirrors rm_train_orm's batched structure (reward.cyr).
+# the two sampled rollouts of one preference slot — shared by dpo_train, ipo_train and
+# ipo_mean_h; (re)sized to g_T whenever the rollout length changes
 var DA_st = 0; var DA_ac = 0; var DB_st = 0; var DB_ac = 0;
+var DAB_T = 0;
+# (re)size the slot buffers DA_* / DB_* to g_T
 fn dpo_bufs(): i64 {
-    if (DA_st == 0) { DA_st = t_alloc(g_T); DA_ac = t_alloc(g_T); DB_st = t_alloc(g_T); DB_ac = t_alloc(g_T); }
+    if (DAB_T != g_T) {
+        DA_st = t_alloc(g_T); DA_ac = t_alloc(g_T); DB_st = t_alloc(g_T); DB_ac = t_alloc(g_T);
+        DAB_T = g_T;
+    }
     return 0;
 }
+# sample one on-policy rollout into (dst_st, dst_ac)
 fn dpo_sample_to(dst_st, dst_ac): i64 {
     rl_rollout(rl_prompt());
     var t = 0;
@@ -201,12 +237,17 @@ fn dpo_sample_to(dst_st, dst_ac): i64 {
     }
     return 0;
 }
-fn dpo_count_target(actions): i64 {                 # target-token count of a stored rollout (f64)
+# target-token count of a stored rollout (f64)
+fn dpo_count_target(actions): i64 {
     var c = 0; var t = 0;
     while (t < g_T) { if (load64(actions + t*8) == g_target) { c = c + 1; } t = t + 1; }
     return f64_from(c);
 }
+# DPO from sampled preferences: per slot two rollouts, the higher target count wins, a tie
+# is skipped; one mean-gradient Adam step per batch
 fn dpo_train(steps, batch, lr): i64 {
+    guard(batch >= 1, "dpo_train: batch must be >= 1");
+    memo_begin();
     dpo_bufs();
     var invB = f64_div(f64_from(1), f64_from(batch));
     var s = 0;
@@ -216,23 +257,30 @@ fn dpo_train(steps, batch, lr): i64 {
         while (nb < batch) {
             dpo_sample_to(DA_st, DA_ac); dpo_sample_to(DB_st, DB_ac);
             var ra = dpo_count_target(DA_ac); var rb = dpo_count_target(DB_ac);
-            if (f64_gt(ra, rb) == 1) { dpo_backward_pair(DA_st, DA_ac, DB_st, DB_ac, g_T, DPO_BETA()); used = used + 1; }
-            elif (f64_gt(rb, ra) == 1) { dpo_backward_pair(DB_st, DB_ac, DA_st, DA_ac, g_T, DPO_BETA()); used = used + 1; }
+            if (f64_gt(ra, rb) == 1) {
+                dpo_backward_pair(DA_st, DA_ac, DB_st, DB_ac, g_T, DPO_BETA()); used = used + 1;
+            } elif (f64_gt(rb, ra) == 1) {
+                dpo_backward_pair(DB_st, DB_ac, DA_st, DA_ac, g_T, DPO_BETA()); used = used + 1;
+            }
             # tie -> no preference signal this slot
             nb = nb + 1;
         }
         if (used > 0) {
-            t_scale(G_E, g_V * g_D, invB); t_scale(G_W, g_D * g_V, invB); t_scale(G_b, g_V, invB);
+            pol_scale_grads(invB);
             pol_adam_step(lr);
         }
         s = s + 1;
     }
+    memo_end();
     return 0;
 }
 
 # mean KL(π_θ ‖ π_ref) over n random states — the divergence-from-reference metric.
 fn dpo_mean_kl(n): i64 {
+    guard(n >= 1, "dpo_mean_kl: n must be >= 1");
+    memo_begin();
     var sum = f64_from(0); var k = 0;
     while (k < n) { sum = f64_add(sum, kl_div_at((rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V)); k = k + 1; }
+    memo_end();
     return f64_div(sum, f64_from(n));
 }

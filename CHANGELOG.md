@@ -4,6 +4,120 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-09
+
+The P(-1) audit, refactor, hardening, optimization and repair sweep, recorded in
+[`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md) — the first audit of the
+`--pref` input path, which 1.1.2 added after the 0.8.0 audit. Toolchain and dependencies
+unchanged (cyrius 6.7.18; tyche 1.2.2, rosnet 1.4.1, akshara 1.1.2). No public signature changed.
+Every refactor and the optimization keep every bit of every result
+([ADR 0002](docs/adr/0002-optimizations-preserve-bits.md)); the three behavior changes are listed
+below with what they move.
+
+### Security
+
+- **HIGH — `--pref`: a byte that exists only after escape decoding had token id −1, and −1
+  indexed the policy's tensors.** The byte vocab was built over the file's raw bytes, then JSON
+  escapes were decoded — producing bytes the raw file never holds (`\t`, `\r`, and `\n` in a file
+  with no raw newline). akshara maps such a byte to −1. As a state it read the embedding at
+  `P_E − 64` and wrote eight gradients into the tail of the live bias tensor `P_b`; as an action
+  it overwrote `S_logits[V−1]` and took `ln` of a raw logit. A crafted file trained on corrupted
+  parameters and still printed `PASS` with exit 0, or produced NaN losses printed as `0.00`. Now
+  ingestion runs in two passes: `pref_corpus` decodes every well-formed row and the vocab is built
+  over **those** bytes (the fixture's vocab drops from 45 to 33: no JSON punctuation), and a byte
+  without an id refuses its row ("byte not in vocab") instead of reaching the tables. Every token
+  argument of the policy, reference and reward-model functions is now range-checked (fail loud).
+  Found by a delegated review of the `--pref` surface and reproduced against 1.2.1.
+
+### Fixed
+
+- **`--pref`, MEDIUM:**
+  - A file over 1 MB was silently truncated to its first 1,048,576 bytes; it is now refused
+    (exit 1).
+  - Labels were parsed by a lenient integer reader: `"1"`, `"x1"`, `0.1`, `+1`, `[1]` and
+    `18446744073709551617` counted as +1. A label must now be the bare number `1` or `-1`.
+  - Field types and line structure were unchecked: `"chosen":null` trained as the text `null`,
+    an object as its raw JSON; junk around the object was tolerated. A line must now be one JSON
+    object, and `kind` and every text field JSON strings.
+  - `\uXXXX`, `\b` and `\f` decoded wrong (`é` became the text `u00e9`). Decoding now covers
+    RFC 8259 in full, with surrogate pairs and UTF-8; an invalid escape refuses the row.
+- **`--pref`, LOW:** a pair whose two truncated spans are identical carries no preference and is
+  refused (it made the whole run fail); every refused row is counted by reason
+  (`pref_skip_count`, nine `PI_R_*` codes) and the reasons print; NaN and Inf print as `nan` /
+  `inf`, not as numbers.
+- **The IPO / KTO demo gate now counts toward `ALL GATES PASS`.** It printed on success and stayed
+  silent on failure, and the exit code ignored it.
+- **A batch or count of 0** scaled the gradient by 1/0 and silently made every parameter NaN
+  (0.8.0 had accepted this). Training and evaluation entries now guard ≥ 1, and `pol_init` guards
+  V, D, T ≥ 1.
+- **Buffers sized at first use** (`dpo_bufs`, `ipo_bufs`, `kto_bufs`, `orm_bufs`) were overrun by
+  a later `pol_init` with a longer rollout; they now re-size when `g_T` changes. Each module
+  records the dims its `*_init` sized it for, and its public entries abort when they are stale
+  (0.8.0's accepted "re-init" item). `search_setup` now allocates the beam buffers itself.
+- `tarka --anything` ran the full demo; an unknown argument now prints usage and exits 2, and
+  `--help` exists.
+
+### Changed — behavior (each moves results; golden cases re-recorded as named)
+
+- **`ipo_mean_h` skips tied draws.** A draw where both rollouts have the same target count has
+  no winner; `ipo_train` skips it, but the metric scored it with an arbitrary winner, pulling the
+  mean toward 0. The demo's IPO line moves from `h 0.00 -> 0.59` to `h 0.00 -> 0.85` (target
+  1.00). Golden case: `ipo metric`.
+- **`--pref` output.** The vocab is smaller (decoded bytes only), so V and every number after it
+  can differ for the same file; the summary line itemizes refusals; KTO is gated on each class
+  that is present (desirable mean log-ratio up, undesirable down) instead of on their gap, which
+  a single-class file passed against a made-up 0. Golden case: `pref ingest`. **Migration:** an
+  ifran `pref export` is unaffected beyond the numbers; a hand-written file must use JSON strings,
+  `1` / `-1` labels and one object per line.
+- **`reason_verifier_gate` returns 0 when one of its classes is empty** (it returned 1, a vacuous
+  pass). The demo is unaffected.
+
+### Changed — refactor and speed (bit-identical)
+
+- One policy-gradient seed kernel (`pol_seed_bwd`) replaces four copies; one softmax
+  (`softmax_into`) and one Adam kernel (`adam_kernel`) serve the policy, the reference and the
+  reward model; `ppo_update`, `grpo_collect` / `grpo_update`, `kl_penalty_step` and
+  `src/report.cyr` replace the PPO, GRPO, KL-penalty and printing duplicates.
+- **A per-state distribution memo** ([architecture note 001](docs/architecture/001-distribution-memo.md)):
+  the policy is a bigram, so inside a training step or an evaluation loop at most V distinct
+  π(·|x) exist. tarka's own loops compute each once per parameter version and copy it, and so do
+  the frozen reference and the reward model; a region entry or any parameter write retires the
+  cache. The demo runs **3,495 → 986 ms** (3.5×); REINFORCE / PPO / GRPO / DPO / KTO steps
+  2.9× / 1.7× / 2.7× / 4.2× / 4.8×; a 103 KB `--pref` file 219 → 41 s. Beam search is not cached
+  (it reports matched compute in forward passes). `pref_ingest_file` is 17% slower per MB (the
+  validating second pass).
+
+### Added
+
+- `tests/golden.tcyr` — 14 FNV-1a digests of every trainer's raw result bits, recorded on 1.2.1,
+  one table per target (aarch64 fuses rosnet's multiply-add).
+- `tests/units.tcyr` (38), 65 new `--pref` regressions (`tests/pref_ingest.tcyr` 23 → 88), 13
+  abort probes (`tests/abort/`), a seeded 5-property `--pref` fuzz harness (4,000 rounds; was a
+  stub), 15 benchmarks (was a no-op) and `scripts/bench-history.sh` / `bench-history.csv`.
+  Assertions 73 → **190**. A 17-mutant run (the original HIGH bug, each repair, each cache
+  invalidation) is killed in full.
+- `pref_corpus`, `pref_skip_count` + `PI_R_*` / `PI_NREASON`, `kl_penalty_step`, `print_f2` /
+  `print_cd` / `rp_puts` / `rp_putc` (`src/report.cyr`).
+- **CI** runs the demo (every gate), `--pref` on a fixture, the over-cap refusal, the usage exit,
+  the quickstart, the suites, the abort probes, the benchmarks and the fuzz harness, with fmt /
+  lint (any warning fails) / vet / doc / `deps --verify` + `--locked` gates and an aarch64 job
+  (cross-build + qemu). Workflows default to `contents: read` (write only on the release job),
+  checkouts do not persist credentials, actions are pinned by commit SHA (checkout v7.0.1,
+  action-gh-release v3.0.3), the tag filter is `X.Y.Z*`, and a release ships a source archive and
+  `SHA256SUMS`. `.gitattributes` keeps `lib/` byte-exact for `deps --verify`.
+
+### Documentation
+
+- `docs/audit/2026-11-09-audit.md`, ADR 0002, architecture note 001, `docs/sources.md` (a citation
+  for every algorithm and default constant), and `docs/benchmarks.md` § 6–8 (alignment, `--pref`,
+  throughput). Every function in `src/` has a doc comment (93 added).
+- Corrected: `SECURITY.md` (described 1.0.0, cyrius 6.2.37 and "no untrusted input"); the README,
+  `CONTRIBUTING.md` and the guide (24/24 tests, a 1.8 s demo); `docs/api.md` (the 1 MB "cap"
+  truncated; `kto_mean_rho` had no caller; buffers are not all allocated in `*_init`); the
+  `--pref` header (it said rows with `\"` in their text are skipped; the vendored bayan
+  honours the escape and they ingest); the ADR index; `CLAUDE.md` and `CONTRIBUTING.md`
+  (`var buf[N]` is N bytes in a function, N × 8 at module scope).
+
 ## [1.2.1] - 2026-11-09
 
 A toolchain and dependency realign to the latest releases. Its one source change moves

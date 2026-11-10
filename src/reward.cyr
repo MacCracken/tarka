@@ -28,7 +28,16 @@ var S_rlog = 0;     # V   backward seed dz_s (separate from forward buffer)
 var S_rdemb = 0;    # D   embedding grad
 var g_rb1t = 0;     # RM-own adam bias-correction powers (NOT the policy's g_b1t/g_b2t)
 var g_rb2t = 0;
+# the RM's per-state logits cache, on rl.cyr's memo-region rules (bumped by rm_init and
+# rm_adam_step, retired on entering the outermost region)
+var RC_logits = 0;  # V*V  cached z_s, row s
+var RC_stamp = 0;   # V    the RC_epoch row s was filled at (0 = never)
+var RC_epoch = 0;
+var RC_seen = 0;
+var RM_V = 0; var RM_D = 0;   # the dims rm_init sized the RM for
 
+# allocate and initialize the reward model (own embedding + head) and its cache for the
+# current dims (call after pol_init)
 fn rm_init(): i64 {
     P_Er = t_alloc(g_V * g_D); P_Wr = t_alloc(g_D * g_V); P_br = t_alloc(g_V);
     G_Er = t_alloc(g_V * g_D); G_Wr = t_alloc(g_D * g_V); G_br = t_alloc(g_V);
@@ -40,6 +49,9 @@ fn rm_init(): i64 {
     t_randn(P_Wr, g_D * g_V, f64_div(f64_from(1), f64_from(10)));
     t_zero(P_br, g_V);
     g_rb1t = f64_from(1); g_rb2t = f64_from(1);
+    RC_logits = t_alloc(g_V * g_V); RC_stamp = t_alloc(g_V); t_zero(RC_stamp, g_V);
+    RC_epoch = RC_epoch + 1;
+    RM_V = g_V; RM_D = g_D;
     return 0;
 }
 
@@ -66,7 +78,20 @@ fn rm_logits(x): i64 {
     linear_fwd(P_Er + x * g_D * 8, P_Wr, P_br, S_rlogits, 1, g_D, g_V);
     return 0;
 }
-fn rm_reward(x, a): i64 { rm_logits(x); return load64(S_rlogits + a * 8); }
+# r_θ(x, a). Inside a memo region the row z_x is computed once per RM version.
+fn rm_reward(x, a): i64 {
+    guard((RM_V == g_V) && (RM_D == g_D), "rm_reward: call rm_init() after pol_init()");
+    guard((x >= 0) && (x < g_V) && (a >= 0) && (a < g_V), "rm_reward: token out of range (0..V-1)");
+    if (g_memo_depth == 0) { rm_logits(x); return load64(S_rlogits + a * 8); }
+    if (RC_seen != g_memo_gen) { RC_epoch = RC_epoch + 1; RC_seen = g_memo_gen; }
+    var row = RC_logits + x * g_V * 8;
+    if (load64(RC_stamp + x * 8) != RC_epoch) {
+        rm_logits(x);
+        t_copy(row, S_rlogits, g_V);
+        store64(RC_stamp + x * 8, RC_epoch);
+    }
+    return load64(row + a * 8);
+}
 
 # score of an n-step rollout: Σ_{t<n} r_θ(states[t], actions[t]).
 fn rm_score(states, actions, n): i64 {
@@ -81,6 +106,7 @@ fn rm_pair_loss(stW, acW, stL, acL, n): i64 {
     return bt_loss(rm_score(stW, acW, n), rm_score(stL, acL, n));
 }
 
+# zero the RM gradient accumulators
 fn rm_zero_grads(): i64 { t_zero(G_Er, g_V*g_D); t_zero(G_Wr, g_D*g_V); t_zero(G_br, g_V); return 0; }
 
 # accumulate one rollout's RM gradient with a fixed per-step scalar g_r. Seed
@@ -111,26 +137,18 @@ fn rm_backward_pair(stW, acW, stL, acL, n): i64 {
 }
 
 # Adam on the RM blocks using the RM's OWN bias-correction powers (never mutate the
-# policy's g_b1t/g_b2t — the RM trains on its own schedule).
-fn rm_adam_one(P, G, M, Vv, n, lr): i64 {
-    var b1 = ADAM_B1(); var b2 = ADAM_B2(); var eps = ADAM_EPS();
-    var bc1 = f64_sub(f64_from(1), g_rb1t);
-    var bc2 = f64_sub(f64_from(1), g_rb2t);
-    var om1 = f64_sub(f64_from(1), b1);          # (1-β1), (1-β2): loop-invariant — hoisted (0.9.0)
-    var om2 = f64_sub(f64_from(1), b2);
-    var i = 0;
-    while (i < n) {
-        var g = load64(G + i*8);
-        var m = f64_add(f64_mul(b1, load64(M + i*8)), f64_mul(om1, g));
-        var vv = f64_add(f64_mul(b2, load64(Vv + i*8)), f64_mul(om2, f64_mul(g, g)));
-        store64(M + i*8, m); store64(Vv + i*8, vv);
-        var step = f64_div(f64_mul(lr, f64_div(m, bc1)), f64_add(f64_sqrt(f64_div(vv, bc2)), eps));
-        store64(P + i*8, f64_sub(load64(P + i*8), step));
-        i = i + 1;
-    }
+# policy's g_b1t/g_b2t — the RM trains on its own schedule). Same kernel as the policy's.
+fn rm_adam_one(P, G, M, Vv, n, lr): i64 { return adam_kernel(P, G, M, Vv, n, lr, g_rb1t, g_rb2t); }
+
+# scale the RM gradient accumulators by s (the 1/batch mean before an Adam step)
+fn rm_scale_grads(s): i64 {
+    t_scale(G_Er, g_V*g_D, s); t_scale(G_Wr, g_D*g_V, s); t_scale(G_br, g_V, s);
     return 0;
 }
+
+# advance the RM's bias-correction powers one step, then Adam-update its three blocks
 fn rm_adam_step(lr): i64 {
+    RC_epoch = RC_epoch + 1;                 # the RM changes: retire cached rows
     g_rb1t = f64_mul(g_rb1t, ADAM_B1());
     g_rb2t = f64_mul(g_rb2t, ADAM_B2());
     rm_adam_one(P_Er, G_Er, M_Er, V_Er, g_V*g_D, lr);

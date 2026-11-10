@@ -33,10 +33,11 @@ the *methods* are the point):
   **verifier best-of-N**, and **PRM-guided beam search** that steers generation to a
   verifier objective greedy and best-of-N cannot reach.
 
-Every hand-derived backward is finite-difference grad-checked (**24/24**), and each
-method is held to a falsifiable **acceptance gate** — see
-[`docs/benchmarks.md`](docs/benchmarks.md). A 0.8.0 security/hardening audit
-([`docs/audit/`](docs/audit/2026-06-22-audit.md)) found **0 reachable bugs**.
+Every hand-derived backward is finite-difference grad-checked (**50**), each method is
+held to a falsifiable **acceptance gate** — see [`docs/benchmarks.md`](docs/benchmarks.md) —
+and every trainer's result is held to the bit by a golden gate on x86_64 and aarch64.
+Audits: [1.2.2](docs/audit/2026-11-09-audit.md) (the P(-1) sweep, incl. the `--pref`
+input path) and [0.8.0](docs/audit/2026-06-22-audit.md).
 
 ## Results (headline)
 
@@ -47,6 +48,8 @@ method is held to a falsifiable **acceptance gate** — see
 | self-consistency (answer accuracy, votes 1→64) | 627 → **930** ‰ |
 | verifier best-of-N (true reward, N=16) | **892** vs 530 mean ≈ oracle 894 |
 | PRM-guided beam vs best-of-N vs greedy (matched compute) | **13.50** vs 4.05 vs 0.20 of 16 |
+| DPO from preferences alone / KL penalty | target 0.94 → **24.00** / KL 3.33 → 2.46 |
+| IPO margin / KTO log-ratios | h 0.00 → **0.85** (target 1.00) / ρ +80.31 vs −138.27 |
 
 Full methodology + reproduction: [`docs/benchmarks.md`](docs/benchmarks.md).
 
@@ -73,10 +76,12 @@ cyrius deps                              # resolve stdlib + rosnet/tyche/akshara
 cyrius build src/main.cyr build/tarka    # compile to a static ELF
 ./build/tarka                            # run the demo — every acceptance gate
 ./build/tarka --pref prefs.jsonl         # train DPO/IPO/KTO from an ifran pref export
-cyrius test                              # finite-difference grad-checks + ingestion suite
+./build/tarka --help                     # usage
+cyrius test                              # grad-checks, ingestion, units, the golden gate
 ```
 
-The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 1.8 s).
+The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 1 s). `--pref`
+refuses files over 1 MB and prints why each refused row was refused.
 
 ## License
 

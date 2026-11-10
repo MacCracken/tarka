@@ -1,0 +1,10 @@
+{"kind":"pair","prompt":"What is 2+2?","chosen":"4","rejected":"5"}
+{"kind":"pair","prompt":"Capital of France?","chosen":"Paris","rejected":"Lyon"}
+{"kind":"pair","prompt":"Say hi\tplease","chosen":"hello there\nfriend","rejected":"go away"}
+{"kind":"unary","prompt":"Rate this","completion":"clear and correct","label":1}
+{"kind":"unary","prompt":"Rate this","completion":"helpful answer","label":1}
+{"kind":"unary","prompt":"Rate this","completion":"wrong and rude","label":-1}
+{"kind":"unary","prompt":"Rate this","completion":"off topic","label":-1}
+{"kind":"unary","prompt":"Rate this","completion":"bad label row","label":7}
+this line is not json
+{"kind":"mystery","prompt":"p","completion":"c"}

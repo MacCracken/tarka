@@ -11,10 +11,13 @@ tarka is a *reference* — the goal is that each RL/reasoning idea is demonstrab
 that the expected ordering between methods holds, not raw throughput. So the benchmarks are
 **method-vs-method acceptance gates**, each falsifiable: if the better method did not actually
 beat the baseline the gate would fail. Correctness underneath is gated separately by the
-**24/24 finite-difference grad-checks** (`cyrius test`) — every hand-derived backward is
-verified against central differences before any of these numbers are trusted.
+**50 finite-difference grad-checks** (`cyrius test`) — every hand-derived backward is
+verified against central differences before any of these numbers are trusted — and by
+`tests/golden.tcyr`, which holds every trainer's result to the bit
+([ADR 0002](adr/0002-optimizations-preserve-bits.md)).
 
-Measured on the dev host (cyrius 6.2.37): full demo wall-clock **≈ 1.8 s**.
+Measured on the dev host (cyrius 6.7.18, x86_64): full demo wall-clock **986 ms** (1.2.2;
+3,495 ms at 1.2.1 — § 8). The numbers below are the same on aarch64 (qemu).
 
 ## 1. REINFORCE — the policy learns (count task)
 
@@ -88,17 +91,84 @@ All three measured at **matched compute** (total policy+PRM forward passes/promp
 **Gate:** at matched compute, beam beats best-of-N **3.3×** and greedy **67×** — verifier-guided
 search generates a verifier-preferred sequence neither greedy nor best-of-N can. ✅
 
+## 6. Alignment — DPO, the KL penalty, IPO and KTO
+
+Preference optimization against a frozen reference policy (the initial policy), on the count
+task. DPO and IPO prefer the higher-target-count rollout of each sampled pair; KTO labels each
+rollout desirable / undesirable against its batch's mean count.
+
+| method | metric | before | after |
+|--------|--------|--------|-------|
+| DPO (preferences only, β 0.1) | target frequency / 24 | 0.94 | **24.00** |
+| KL-to-reference penalty (60 steps) | mean KL to the reference | 3.33 | **2.46** |
+| IPO (β 0.5, target margin 1.00) | mean implicit-reward margin h | 0.00 | **0.85** |
+| KTO (β 0.1) | log-ratio ρ, desirable / undesirable held sequence | 0.00 / 0.00 | **80.31 / −138.27** |
+
+**Gates:** DPO raises the target frequency ≥ 1.5× and the penalty lowers the KL ✅; IPO raises h
+toward its target and KTO moves the two held sequences apart ✅ (this second gate counts toward
+`ALL GATES PASS` since 1.2.2). 1.2.1 printed IPO's h as 0.59: `ipo_mean_h` scored tied draws,
+which carry no preference, with an arbitrary winner.
+
+## 7. Preference ingestion — `tarka --pref`
+
+`tests/fixtures/prefs.jsonl`: 3 pairs, 4 thumbs (2 desirable, 2 undesirable), a bad label, a
+non-JSON line and an unknown kind (`vocab=33  pairs=3  unary=4  skipped=3 (malformed 1, bad label
+1, unknown kind 1)`).
+
+| optimizer | before | after |
+|-----------|--------|-------|
+| DPO | loss 0.69, ranked 0/3 | loss 0.00, ranked **3/3** |
+| IPO | loss 1.00, ranked 0/3 | loss 0.00, ranked **3/3** |
+| KTO | ρ desirable 0.00 / undesirable 0.00 | **42.12 / −132.60** |
+
+**Gates:** every pair ranked correctly with the loss down; each present KTO class moved in its
+direction ✅. Wall-clock 64 ms.
+
+## 8. Throughput
+
+`scripts/bench-history.sh` runs `CYRIUS_DCE=1 cyrius bench tests/tarka.bcyr` three times and
+appends the medians to `bench-history.csv`. The two rows below were recorded in one session on
+the dev host (AMD Ryzen 7 5800H, x86_64), before and after the 1.2.2 sweep:
+
+| benchmark | 1.2.1 | 1.2.2 | |
+|-----------|------:|------:|---|
+| forward V28 D8 | 904 ns | 894 ns | (kernel, uncached) |
+| forward V256 D64 | 11.57 µs | 12.83 µs | (kernel, uncached; run-to-run spread) |
+| rollout T24 V28 D8 | 23.06 µs | 24.17 µs | (outside a memo region) |
+| rl_backward T24 V28 D8 | 43.90 µs | 41.04 µs | |
+| rl_backward T24 V256 D64 | 856.3 µs | 794.1 µs | |
+| adam step V28 D8 | 8.77 µs | 9.02 µs | |
+| adam step V256 D64 | 595.8 µs | 603.6 µs | |
+| **REINFORCE step** (batch 16, T 24, V28 D8) | 1,072 µs | **368 µs** | 2.9× |
+| **PPO step** (4 epochs) | 285.4 µs | **171.3 µs** | 1.7× |
+| **GRPO step** (group 8) | 703.0 µs | **263.3 µs** | 2.7× |
+| PRM step (batch 16, V12 D8) | 26.7 µs | 24.2 µs | |
+| **DPO step** (batch 16) | 2,692 µs | **649 µs** | 4.2× |
+| **KTO step** (batch 16) | 2,486 µs | **515 µs** | 4.8× |
+| beam search B8 K8 (per prompt) | 313.9 µs | 307.5 µs | (uncached by design) |
+| pref_ingest_file, ~1 MB JSONL | 22.06 ms | 25.83 ms | 17% slower: the validating second pass |
+
+End to end: the demo 3,495 → **986 ms** (median of three, 3.5×); the review's 103 KB, V 92
+preference file 219 → 41 s; the demo under qemu-aarch64 36 → 10 s.
+
 ## Performance notes
 
+- **The distribution memo** (1.2.2, [architecture note 001](architecture/001-distribution-memo.md)):
+  the policy is a bigram, so inside a training step or an evaluation loop at most V distinct
+  π(·|x) exist. tarka's loops compute each once per parameter version and copy it; so do the
+  frozen reference (every DPO / IPO / KTO / KL forward) and the reward model. Bits unchanged —
+  `tests/golden.tcyr` checks it on both targets. The kernel rows in § 8 do not move because
+  they run outside a memo region.
+- **What a training step costs now**: `linear_bwd` (≈ 0.9 µs per token at V 28, D 8 — a
+  REINFORCE step runs 384). Batching the backward per state would cut it, but reorders the
+  gradient's sums — a behavior change under ADR 0002, not an optimization (see the 2026-11-09
+  audit's observations).
 - **Allocation discipline**: every working buffer (policy/critic/reward parameters + gradients
-  + Adam moments, rollout/group/beam scratch) is allocated once in an `*_init` function and
-  reused across all steps — there is **no per-step allocation churn** in any training, rollout,
-  or search loop.
-- **Compute profile**: wall-clock is dominated by the rosnet `linear_fwd`/`linear_bwd` matmuls
-  in rollouts and backward passes (and, in §5, the beam's `B·K·T` PRM forwards), not by the
-  optimizer. A 0.9.0 loop-invariant hoist in the Adam inner loops (`(1−β)` precomputed once)
-  leaves the numerics byte-identical and the wall-clock unchanged precisely because the demo is
-  rollout/matmul-bound, not Adam-bound — recorded here for honesty, not as a speed claim.
+  + Adam moments, the memo tables, rollout/group/beam scratch) is allocated in an `*_init`
+  function or once on first use (re-sized when the rollout length changes) and reused —
+  there is **no per-step allocation churn** in any training, rollout, or search loop.
+- **Adam**: a 0.9.0 loop-invariant hoist in the Adam inner loop (`(1−β)` precomputed once)
+  leaves the numerics byte-identical; Adam is ~1% of a training step at the demo's shape.
 - **Matched-compute methodology (§5)**: the budget unit is *total `linear_fwd` calls* (policy +
   PRM), counted via wrapper functions, so the beam-vs-best-of-N comparison is fair — best-of-N
   is given the same per-prompt forward budget as beam (1152), not merely the same sample count.

@@ -8,11 +8,17 @@
 2. `cyrius deps` — resolve stdlib + the sibling deps (rosnet / tyche / akshara)
    into `lib/`.
 3. `cyrius build src/main.cyr build/tarka` — compile the demo (every milestone
-   end-to-end; prints `ALL GATES PASS`, ≈ 1.8 s).
-4. `cyrius test` — run the finite-difference grad-check suite
-   (`tests/tarka.tcyr`, **24/24**) plus the `[build].test` entry (`src/test.cyr`).
-5. `cyrius build tests/tarka.fcyr build/fuzz && ./build/fuzz` — fuzz stub.
-6. `cyrius build tests/tarka.bcyr build/bench && ./build/bench` — benchmark stub.
+   end-to-end; prints `ALL GATES PASS`, ≈ 1 s).
+4. `cyrius test` — the suites: the finite-difference grad-checks (`tests/tarka.tcyr`),
+   the `--pref` ingestion suite (`tests/pref_ingest.tcyr`), the unit suite
+   (`tests/units.tcyr`) and the golden gate (`tests/golden.tcyr`), plus the
+   `[build].test` stub (`src/test.cyr`).
+5. `CYRIUS_DCE=1 cyrius build tests/tarka.fcyr build/fuzz && ./build/fuzz` — the
+   seeded `--pref` fuzz harness (4,000 rounds).
+6. `CYRIUS_DCE=1 cyrius bench tests/tarka.bcyr` — the benchmarks;
+   `scripts/bench-history.sh` appends their medians to `bench-history.csv`.
+7. `tests/abort/*.cyr` — each must exit 1 with `tarka: precondition violated`
+   (CI builds and runs every one).
 
 There is no Makefile — `cyrius build` / `cyrius test` are the loop. See
 [`CLAUDE.md`](CLAUDE.md) for the full development process and
@@ -40,9 +46,10 @@ matched compute. A change that touches a method must keep its gate green.
 - Build precise constants from integer ratios or runtime math (e.g.
   `f64_div(f64_from(1), f64_from(10000))` for `1e-4`); long-digit float literals
   mis-parse.
-- `var buf[N]` declares N **bytes**, not N entries. Forward writes; backward
-  accumulates into parameter grads. No allocation inside the training/rollout
-  loop — all buffers are `*_init`-allocated once and reused.
+- `var buf[N]` declares N **bytes** inside a function and N **i64 slots** (N × 8
+  bytes) at module scope. Forward writes; backward accumulates into parameter
+  grads. No allocation inside the training/rollout loop — buffers are
+  `*_init`-allocated (or allocated once on first use) and reused.
 
 ## Process
 
@@ -50,8 +57,11 @@ matched compute. A change that touches a method must keep its gate green.
 - Test after every change; grad-check after every backward-touching change; keep
   the affected acceptance gate green after any method change.
 - Performance claims must include numbers — `before → after` with the bench/gate
-  name. (The demo is rollout/matmul-bound, so micro-opts that don't move the
-  wall clock should say so rather than claim a speedup.)
+  name, from `scripts/bench-history.sh` in one session. A refactor or an
+  optimization must keep every bit: `tests/golden.tcyr` must stay green on x86_64
+  and aarch64 ([ADR 0002](docs/adr/0002-optimizations-preserve-bits.md)); a change
+  that moves a bit is a behavior change, re-records only the cases it touches, and
+  says so in the CHANGELOG.
 - Breaking changes get a `Breaking` section in [`CHANGELOG.md`](CHANGELOG.md)
   with a migration paragraph. The public 1.x surface is frozen — see
   [`docs/api.md`](docs/api.md); the internal mechanism is explicitly out of the

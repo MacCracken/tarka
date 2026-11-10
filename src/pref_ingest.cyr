@@ -7,34 +7,44 @@
 #   {"kind":"pair","prompt":"...","chosen":"...","rejected":"..."}     DPO / IPO
 #   {"kind":"unary","prompt":"...","completion":"...","label":±1}      KTO
 #
-# The pipeline: read the file → akshara byte-level vocab over the WHOLE file
-# (`corpus_set`, so every byte of every field tokenizes) → parse each line with
-# bayan's flat JSON parser → tokenize prompt/completion(s) → drive the EXISTING
-# hand-derived, FD-gated primitives (`dpo_backward_pair` / `ipo_backward_pair`
-# / `kto_backward_example`) full-batch over the ingested examples. No new
-# gradient math lands here — this is a data path, not a loss.
+# The file is untrusted input (docs/audit/2026-11-09-audit.md). The pipeline:
+#   1. read it, refusing anything over PI_FMAX() bytes rather than truncating;
+#   2. pass 1 (pref_corpus): validate every line and decode its text fields (the full
+#      RFC 8259 escape set, \uXXXX to UTF-8), and build akshara's byte vocab over the
+#      DECODED bytes, so every byte of every field has a token id;
+#   3. pass 2 (pref_ingest_file): validate again, tokenize, shape the bigram (state,
+#      action) spans, and store the rows; every refusal is counted by reason;
+#   4. drive the EXISTING hand-derived, FD-gated primitives (`dpo_backward_pair` /
+#      `ipo_backward_pair` / `kto_backward_example`) full-batch over the rows. No new
+#      gradient math lands here: this is a data path, not a loss.
+#
+# A line is accepted only as one JSON object (nothing but whitespace around it) whose
+# "kind" is the string "pair" or "unary", whose text fields are JSON strings, and (unary)
+# whose "label" is the bare number 1 or -1. bayan's flat parser refuses a duplicate key
+# and is lenient about commas; it compares keys by their raw bytes, so an escaped key
+# ("kind") reads as absent and the row is refused.
 #
 # Sequence shape (bigram policy): for prompt tokens p₀..p_{a-1} and completion
 # tokens c₀..c_{b-1}, the scored span is the completion given its left context:
 #   states  = [p_{a-1}, c₀, …, c_{b-2}]
 #   actions = [c₀,      c₁, …, c_{b-1}]      (n = b pairs; prompt-less rows use
 # the completion's own bigrams, n = b−1). DPO/IPO pairs truncate both sides to
-# the shared min (the primitive is single-n); everything caps at PI_NMAX.
+# the shared min (the primitive is single-n); everything caps at PI_NMAX. A pair whose
+# two truncated spans are identical carries no preference (Δ ≡ 0) and is refused.
 #
 # Gates (printed + exit code): with θ snapshotted as its own reference, every
 # pair starts at Δ=0 (loss −lnσ(0)=0.693, ranking accuracy 0) — after training,
-# DPO/IPO must rank every pair correctly (Δ>0) with the mean loss down, and KTO
-# must separate desirable from undesirable mean log-ratios.
-#
-# Known limitation (documented, not hidden): bayan's flat parser scans quoted
-# strings to the next '"' — it does not honor \" escapes, so a row whose TEXT
-# contains a double-quote mis-parses and is counted as skipped. ifran escapes
-# on export; such rows are rare and skipping is loud (the skip count prints).
-# Include AFTER preference_ext.cyr (uses dpo_*/ipo_*/kto_* + pol_*/G_*).
+# DPO/IPO must rank every pair correctly (Δ>0) with the mean loss down; KTO must raise
+# the mean log-ratio of the desirable examples and lower that of the undesirable ones
+# (each class that is present).
+# Include AFTER preference_ext.cyr (uses dpo_*/ipo_*/kto_* + pol_*/G_*) and report.cyr.
 
-fn PI_NMAX(): i64 { return 48; }      # per-sequence (state,action) pair cap
-fn PI_MAXEX(): i64 { return 256; }    # per-kind ingested-row cap
-fn PI_FMAX(): i64 { return 1048576; } # 1 MB file cap
+# per-sequence (state,action) pair cap
+fn PI_NMAX(): i64 { return 48; }
+# per-kind ingested-row cap
+fn PI_MAXEX(): i64 { return 256; }
+# 1 MB file cap (a larger file is refused)
+fn PI_FMAX(): i64 { return 1048576; }
 
 # pair rows: 40 B each — stW acW stL acL n
 var PI_pw = 0; var PI_np = 0;
@@ -42,29 +52,132 @@ var PI_pw = 0; var PI_np = 0;
 var PI_un = 0; var PI_nu = 0;
 var PI_skipped = 0;
 
-fn _pi_puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+# ---- skip reasons ---------------------------------------------------------------
+fn PI_R_MALFORMED(): i64 { return 1; }   # not one JSON object on the line (or a duplicate key)
+# kind / a text field missing, or not a JSON string
+fn PI_R_FIELD(): i64 { return 2; }
+# an invalid escape in a string
+fn PI_R_ESCAPE(): i64 { return 3; }
+# label missing, or not the bare number 1 or -1
+fn PI_R_LABEL(): i64 { return 4; }
+# kind is neither "pair" nor "unary"
+fn PI_R_KIND(): i64 { return 5; }
+# no (state, action) pair to score
+fn PI_R_EMPTY(): i64 { return 6; }
+# a pair whose two scored spans are identical
+fn PI_R_SAME(): i64 { return 7; }
+# the per-kind row cap (PI_MAXEX) was reached
+fn PI_R_CAP(): i64 { return 8; }
+# a byte with no token id in the loaded vocab
+fn PI_R_VOCAB(): i64 { return 9; }
+# the number of skip reasons (PI_R_*)
+fn PI_NREASON(): i64 { return 9; }
+var PI_skip[10];                         # module scope: 10 i64 slots, PI_skip[r] = rows refused for reason r
 
-# local 2-decimal f64 printer (main.cyr's print_f2 is not visible to src modules)
-fn _pi_f2(val): i64 {
-    var b[8];
-    if (((val >> 63) & 1) == 1) { store8(&b, 45); print(&b, 1); val = f64_abs(val); }
-    var fl = f64_floor(val);
-    fmt_int(f64_to(fl));
-    store8(&b, 46); print(&b, 1);
-    var frac = f64_sub(val, fl);
-    var i = 0;
-    while (i < 2) {
-        frac = f64_mul(frac, f64_from(10));
-        var d = f64_floor(frac);
-        fmt_int(f64_to(d));
-        frac = f64_sub(frac, d);
-        i = i + 1;
-    }
+# the printed name of skip reason r
+fn _pi_reason_name(r): i64 {
+    if (r == 1) { return "malformed"; }
+    if (r == 2) { return "bad field"; }
+    if (r == 3) { return "bad escape"; }
+    if (r == 4) { return "bad label"; }
+    if (r == 5) { return "unknown kind"; }
+    if (r == 6) { return "empty span"; }
+    if (r == 7) { return "identical spans"; }
+    if (r == 8) { return "row cap"; }
+    return "byte not in vocab";
+}
+
+# rows refused for reason r
+fn pref_skip_count(r): i64 { return load64(&PI_skip + r * 8); }
+
+fn _pi_skip_reset(): i64 {
+    var r = 0;
+    while (r <= PI_NREASON()) { store64(&PI_skip + r * 8, 0); r = r + 1; }
+    PI_skipped = 0;
     return 0;
 }
 
-# unescape the common JSON escapes in-place-ish (src Str -> fresh buffer).
-# Returns the buffer; out_len cell gets the unescaped length.
+fn _pi_skip_add(r): i64 {
+    store64(&PI_skip + r * 8, load64(&PI_skip + r * 8) + 1);
+    PI_skipped = PI_skipped + 1;
+    return 0;
+}
+
+# print " (malformed 1, bad label 2)" for the nonzero reasons, or nothing
+fn _pi_skip_print(): i64 {
+    if (PI_skipped == 0) { return 0; }
+    rp_puts(" (");
+    var first = 1; var r = 1;
+    while (r <= PI_NREASON()) {
+        var c = pref_skip_count(r);
+        if (c > 0) {
+            if (first == 0) { rp_puts(", "); }
+            rp_puts(_pi_reason_name(r)); rp_puts(" "); fmt_int(c);
+            first = 0;
+        }
+        r = r + 1;
+    }
+    rp_puts(")");
+    return 0;
+}
+
+# ---- one line: structure, kinds, escapes ---------------------------------------------
+# The parsed row (valid after _pi_parse returns 0): PR_kind 1 = pair, 2 = unary; the
+# decoded prompt / chosen-or-completion / rejected bytes and lengths; the unary label.
+var PR_kind = 0; var PR_label = 0;
+var PR_p = 0; var PR_plen = 0;
+var PR_c = 0; var PR_clen = 0;
+var PR_r = 0; var PR_rlen = 0;
+
+fn _pi_ws(c): i64 {                      # JSON whitespace
+    if ((c == 32) || (c == 9) || (c == 10) || (c == 13)) { return 1; }
+    return 0;
+}
+
+# the value of one hex digit, or -1
+fn _pi_hexv(c): i64 {
+    if ((c >= 48) && (c <= 57)) { return c - 48; }
+    if ((c >= 97) && (c <= 102)) { return c - 87; }
+    if ((c >= 65) && (c <= 70)) { return c - 55; }
+    return 0 - 1;
+}
+
+# the 4-hex-digit value at sd[i..i+4), or -1 (short or not hex)
+fn _pi_hex4(sd, i, sl): i64 {
+    if (i + 4 > sl) { return 0 - 1; }
+    var v = 0; var k = 0;
+    while (k < 4) {
+        var h = _pi_hexv(load8(sd + i + k));
+        if (h < 0) { return 0 - 1; }
+        v = v * 16 + h;
+        k = k + 1;
+    }
+    return v;
+}
+
+# write code point cp (0..0x10FFFF) as UTF-8 at dst; returns the byte count (1..4)
+fn _pi_utf8(dst, cp): i64 {
+    if (cp < 128) { store8(dst, cp); return 1; }
+    if (cp < 2048) {
+        store8(dst, 192 | (cp >> 6)); store8(dst + 1, 128 | (cp & 63));
+        return 2;
+    }
+    if (cp < 65536) {
+        store8(dst, 224 | (cp >> 12)); store8(dst + 1, 128 | ((cp >> 6) & 63));
+        store8(dst + 2, 128 | (cp & 63));
+        return 3;
+    }
+    store8(dst, 240 | (cp >> 18)); store8(dst + 1, 128 | ((cp >> 12) & 63));
+    store8(dst + 2, 128 | ((cp >> 6) & 63)); store8(dst + 3, 128 | (cp & 63));
+    return 4;
+}
+
+# Decode a JSON string body (escapes as written; a Str) into a fresh buffer: the full
+# RFC 8259 set — \" \\ \/ \b \f \n \r \t and \uXXXX, a surrogate pair combined, all as
+# UTF-8. Returns the buffer (NUL-terminated) with its length in the out_len cell, or 0
+# for an invalid escape: an unknown letter, short or non-hex \u digits, a lone surrogate,
+# or a backslash that ends the body. The output never outgrows the input (\uXXXX is 6
+# bytes in, at most 3 out; a surrogate pair 12 in, 4 out), so sl + 1 bytes suffice.
 fn _pi_unescape(s, out_len): i64 {
     var sd = str_data(s);
     var sl = str_len(s);
@@ -73,43 +186,184 @@ fn _pi_unescape(s, out_len): i64 {
     var o = 0;
     while (i < sl) {
         var c = load8(sd + i);
-        if (c == 92) {                                # backslash
-            if (i + 1 < sl) {
-                var e = load8(sd + i + 1);
-                if (e == 110) { store8(out + o, 10); }        # \n
-                elif (e == 116) { store8(out + o, 9); }       # \t
-                elif (e == 114) { store8(out + o, 13); }      # \r
-                elif (e == 92) { store8(out + o, 92); }       # backslash
-                elif (e == 34) { store8(out + o, 34); }       # quote
-                else { store8(out + o, e); }                  # unknown: keep raw
-                o = o + 1;
-                i = i + 2;
-            } else { store8(out + o, c); o = o + 1; i = i + 1; }
-        } else { store8(out + o, c); o = o + 1; i = i + 1; }
+        if (c != 92) {
+            store8(out + o, c); o = o + 1; i = i + 1;
+        } else {
+            if (i + 1 >= sl) { return 0; }                   # a backslash ends the body
+            var e = load8(sd + i + 1);
+            var b = 0 - 1;
+            if (e == 34) { b = 34; }                        # \"
+            elif (e == 92) { b = 92; }                      # \\
+            elif (e == 47) { b = 47; }                      # \/
+            elif (e == 98) { b = 8; }                       # \b
+            elif (e == 102) { b = 12; }                     # \f
+            elif (e == 110) { b = 10; }                     # \n
+            elif (e == 114) { b = 13; }                     # \r
+            elif (e == 116) { b = 9; }                      # \t
+            if (b >= 0) {
+                store8(out + o, b); o = o + 1; i = i + 2;
+            } elif (e == 117) {                             # \uXXXX
+                var cp = _pi_hex4(sd, i + 2, sl);
+                if (cp < 0) { return 0; }
+                i = i + 6;
+                if ((cp >= 55296) && (cp <= 56319)) {       # high surrogate: a low one must follow
+                    if (i + 6 > sl) { return 0; }
+                    if (load8(sd + i) != 92) { return 0; }
+                    if (load8(sd + i + 1) != 117) { return 0; }
+                    var lo = _pi_hex4(sd, i + 2, sl);
+                    if ((lo < 56320) || (lo > 57343)) { return 0; }
+                    cp = 65536 + ((cp - 55296) << 10) + (lo - 56320);
+                    i = i + 6;
+                } elif ((cp >= 56320) && (cp <= 57343)) { return 0; }   # a lone low surrogate
+                o = o + _pi_utf8(out + o, cp);
+            } else { return 0; }                            # not a JSON escape
+        }
     }
     store8(out + o, 0);
     store64(out_len, o);
     return out;
 }
 
-# tokenize len bytes via akshara's byte vocab (corpus_set over the whole file
-# guarantees coverage). out[i] = token id.
+# the top-level member whose key is `key` (raw bytes), or 0
+fn _pi_pair(pairs, key): i64 {
+    var k = str_from(key);
+    var n = vec_len(pairs);
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(pairs, i);
+        if (str_eq(bayan_json_key(p), k) == 1) { return p; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# decode string member `key` into (*buf_cell, *len_cell). 0 ok, else a skip reason.
+fn _pi_text(pairs, key, buf_cell, len_cell): i64 {
+    var p = _pi_pair(pairs, key);
+    if (p == 0) { return PI_R_FIELD(); }
+    if (bayan_json_pair_kind(p) != JSON_K_STRING) { return PI_R_FIELD(); }
+    var b = _pi_unescape(bayan_json_value(p), len_cell);
+    if (b == 0) { return PI_R_ESCAPE(); }
+    store64(buf_cell, b);
+    return 0;
+}
+
+# 1 if the n-byte buffer a holds exactly the C string s
+fn _pi_is(a, n, s): i64 {
+    var i = 0;
+    while (i < n) { if (load8(s + i) != load8(a + i)) { return 0; } i = i + 1; }
+    if (load8(s + n) != 0) { return 0; }
+    return 1;
+}
+
+# Validate and decode one line into PR_*. 0 = a well-formed row, else a skip reason.
+fn _pi_parse(ld, ll): i64 {
+    var s = 0; var e = ll;
+    while ((s < e) && (_pi_ws(load8(ld + s)) == 1)) { s = s + 1; }
+    while ((e > s) && (_pi_ws(load8(ld + e - 1)) == 1)) { e = e - 1; }
+    if (e - s < 2) { return PI_R_MALFORMED(); }
+    if (load8(ld + s) != 123) { return PI_R_MALFORMED(); }          # {
+    if (load8(ld + e - 1) != 125) { return PI_R_MALFORMED(); }      # }
+    var pairs = bayan_json_parse(str_new(ld + s, e - s));
+    if (pairs == 0) { return PI_R_MALFORMED(); }
+    var cell = alloc(16);
+    var r = _pi_text(pairs, "kind", cell, cell + 8);
+    if (r != 0) { return r; }
+    var kb = load64(cell); var kl = load64(cell + 8);
+    r = _pi_text(pairs, "prompt", &PR_p, &PR_plen);
+    if (r != 0) { return r; }
+    if (_pi_is(kb, kl, "pair") == 1) {
+        r = _pi_text(pairs, "chosen", &PR_c, &PR_clen);
+        if (r != 0) { return r; }
+        r = _pi_text(pairs, "rejected", &PR_r, &PR_rlen);
+        if (r != 0) { return r; }
+        PR_kind = 1;
+        return 0;
+    }
+    if (_pi_is(kb, kl, "unary") == 1) {
+        r = _pi_text(pairs, "completion", &PR_c, &PR_clen);
+        if (r != 0) { return r; }
+        var lp = _pi_pair(pairs, "label");
+        if (lp == 0) { return PI_R_LABEL(); }
+        if (bayan_json_pair_kind(lp) != JSON_K_BARE) { return PI_R_LABEL(); }
+        var lv = bayan_json_value(lp);
+        if (_pi_is(str_data(lv), str_len(lv), "1") == 1) { PR_label = 1; }
+        elif (_pi_is(str_data(lv), str_len(lv), "-1") == 1) { PR_label = 0 - 1; }
+        else { return PI_R_LABEL(); }                   # ±1 only (ifran's contract)
+        PR_kind = 2;
+        return 0;
+    }
+    return PI_R_KIND();
+}
+
+# Run f(line, length) over each non-empty LF-terminated line of buf[0..flen).
+# kind 1 = the vocab pass (pref_corpus), 2 = the ingest pass (pref_ingest_file).
+var PC_dst = 0; var PC_dlen = 0;
+fn _pi_lines(buf, flen, kind): i64 {
+    var i = 0;
+    var ls = 0;
+    while (i <= flen) {
+        var atend = 0;
+        if (i == flen) { atend = 1; }
+        elif (load8(buf + i) == 10) { atend = 1; }
+        if (atend == 1) {
+            if (i > ls) {
+                var r = 0;
+                if (kind == 1) { r = _pi_vocab_line(buf + ls, i - ls); }
+                else { r = _pi_line(buf + ls, i - ls); }
+                if (r != 0) { _pi_skip_add(r); }
+            }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# pass 1, one line: append a well-formed row's decoded text to PC_dst
+fn _pi_vocab_line(ld, ll): i64 {
+    var r = _pi_parse(ld, ll);
+    if (r != 0) { return r; }
+    memcpy(PC_dst + PC_dlen, PR_p, PR_plen); PC_dlen = PC_dlen + PR_plen;
+    memcpy(PC_dst + PC_dlen, PR_c, PR_clen); PC_dlen = PC_dlen + PR_clen;
+    if (PR_kind == 1) { memcpy(PC_dst + PC_dlen, PR_r, PR_rlen); PC_dlen = PC_dlen + PR_rlen; }
+    return 0;
+}
+
+# Pass 1: write the decoded text of every well-formed row of buf[0..flen) to dst (at
+# least flen bytes: decoding never grows a field) and return its length. corpus_set over
+# it gives a byte vocab with an id for every byte pref_ingest_file will tokenize. The
+# skip counters hold this pass's structural refusals afterwards.
+fn pref_corpus(buf, flen, dst): i64 {
+    _pi_skip_reset();
+    PC_dst = dst; PC_dlen = 0;
+    _pi_lines(buf, flen, 1);
+    return PC_dlen;
+}
+
+# ---- tokenize + shape --------------------------------------------------------------
+# tokenize len bytes via akshara's byte vocab: out[i] = token id. Returns len, or -1
+# when a byte has no id in the loaded vocab (akshara maps an absent byte to -1, which
+# would index the policy's tables at -1).
 fn _pi_tok(txt, len, out): i64 {
     var i = 0;
     while (i < len) {
-        store64(out + i * 8, load64(g_char2id + load8(txt + i) * 8));
+        var id = load64(g_char2id + load8(txt + i) * 8);
+        if (id < 0) { return 0 - 1; }
+        store64(out + i * 8, id);
         i = i + 1;
     }
     return len;
 }
 
 # build the scored (states, actions) span for (prompt, completion) — see the
-# header. Returns n (0 = unusable row). st/ac are caller buffers ≥ PI_NMAX.
+# header. Returns n (0 = nothing to score, -1 = a byte with no token id). st/ac are
+# caller buffers ≥ PI_NMAX.
 fn _pi_seq(ptxt, plen, ctxt, clen, st, ac): i64 {
     if (clen < 1) { return 0; }
     var full = alloc((plen + clen) * 8);
-    _pi_tok(ptxt, plen, full);
-    _pi_tok(ctxt, clen, full + plen * 8);
+    if (_pi_tok(ptxt, plen, full) < 0) { return 0 - 1; }
+    if (_pi_tok(ctxt, clen, full + plen * 8) < 0) { return 0 - 1; }
     var base = plen - 1;
     var n = clen;
     if (plen == 0) { base = 0; n = clen - 1; }
@@ -124,82 +378,63 @@ fn _pi_seq(ptxt, plen, ctxt, clen, st, ac): i64 {
     return n;
 }
 
-# fetch a string field: unescaped bytes + length via out cells. 0 = absent.
-fn _pi_field(pairs, key, out_len): i64 {
-    var v = bayan_json_get_by_str(pairs, str_from(key));
-    if (v == 0) { return 0; }
-    return _pi_unescape(v, out_len);
+# 1 if the two n-step spans are the same (states and actions)
+fn _pi_same(stW, acW, stL, acL, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load64(stW + i * 8) != load64(stL + i * 8)) { return 0; }
+        if (load64(acW + i * 8) != load64(acL + i * 8)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
 }
 
-# parse one JSONL line into the tables. Returns 1 ingested / 0 skipped.
+# pass 2, one line: parse it into the tables. 0 = ingested, else a skip reason.
 fn _pi_line(ld, ll): i64 {
-    var pairs = bayan_json_parse(str_new(ld, ll));
-    if (pairs == 0) { return 0; }
-    var kind = bayan_json_get_by_str(pairs, str_from("kind"));
-    if (kind == 0) { return 0; }
-    var plen = alloc(8);
-    var p = _pi_field(pairs, "prompt", plen);
-    if (p == 0) { return 0; }
-    if (str_eq(kind, str_from("pair")) == 1) {
-        if (PI_np >= PI_MAXEX()) { return 0; }
-        var clen = alloc(8);
-        var c = _pi_field(pairs, "chosen", clen);
-        var rlen = alloc(8);
-        var rj = _pi_field(pairs, "rejected", rlen);
-        if (c == 0) { return 0; }
-        if (rj == 0) { return 0; }
+    var r = _pi_parse(ld, ll);
+    if (r != 0) { return r; }
+    if (PR_kind == 1) {
+        if (PI_np >= PI_MAXEX()) { return PI_R_CAP(); }
         var stW = t_alloc(PI_NMAX()); var acW = t_alloc(PI_NMAX());
         var stL = t_alloc(PI_NMAX()); var acL = t_alloc(PI_NMAX());
-        var nW = _pi_seq(p, load64(plen), c, load64(clen), stW, acW);
-        var nL = _pi_seq(p, load64(plen), rj, load64(rlen), stL, acL);
+        var nW = _pi_seq(PR_p, PR_plen, PR_c, PR_clen, stW, acW);
+        var nL = _pi_seq(PR_p, PR_plen, PR_r, PR_rlen, stL, acL);
+        if ((nW < 0) || (nL < 0)) { return PI_R_VOCAB(); }
         var n = nW;
         if (nL < n) { n = nL; }                       # single-n primitive: shared min
-        if (n < 1) { return 0; }
+        if (n < 1) { return PI_R_EMPTY(); }
+        if (_pi_same(stW, acW, stL, acL, n) == 1) { return PI_R_SAME(); }
         var row = PI_pw + PI_np * 40;
         store64(row, stW); store64(row + 8, acW);
         store64(row + 16, stL); store64(row + 24, acL);
         store64(row + 32, n);
         PI_np = PI_np + 1;
-        return 1;
+        return 0;
     }
-    if (str_eq(kind, str_from("unary")) == 1) {
-        if (PI_nu >= PI_MAXEX()) { return 0; }
-        var klen = alloc(8);
-        var comp = _pi_field(pairs, "completion", klen);
-        if (comp == 0) { return 0; }
-        var lab = bayan_json_get_int_by_str(pairs, str_from("label"));
-        if (lab != 1) { if (lab != (0 - 1)) { return 0; } }   # ±1 only (ifran's contract)
-        var st = t_alloc(PI_NMAX()); var ac = t_alloc(PI_NMAX());
-        var n = _pi_seq(p, load64(plen), comp, load64(klen), st, ac);
-        if (n < 1) { return 0; }
-        var row = PI_un + PI_nu * 32;
-        store64(row, st); store64(row + 8, ac);
-        store64(row + 16, n); store64(row + 24, lab);
-        PI_nu = PI_nu + 1;
-        return 1;
-    }
+    if (PI_nu >= PI_MAXEX()) { return PI_R_CAP(); }
+    var st = t_alloc(PI_NMAX()); var ac = t_alloc(PI_NMAX());
+    var nu = _pi_seq(PR_p, PR_plen, PR_c, PR_clen, st, ac);
+    if (nu < 0) { return PI_R_VOCAB(); }
+    if (nu < 1) { return PI_R_EMPTY(); }
+    var urow = PI_un + PI_nu * 32;
+    store64(urow, st); store64(urow + 8, ac);
+    store64(urow + 16, nu); store64(urow + 24, PR_label);
+    PI_nu = PI_nu + 1;
     return 0;
 }
 
-# ingest the whole file into the tables (corpus/policy must already be set up).
+# Pass 2: ingest buf[0..flen) into the pair / unary tables. The byte vocab must be loaded
+# (corpus_set, over pref_corpus's text) and the policy initialized over it (pol_init with
+# that V). Returns the rows ingested; pref_skip_count(r) / PI_skipped count the rest.
 fn pref_ingest_file(buf, flen): i64 {
+    guard(g_char2id != 0, "pref_ingest_file: load a byte vocab (corpus_set) first");
+    guard((g_V >= 1) && (g_V >= g_corpus_vlen),
+      "pref_ingest_file: initialize the policy (pol_init) over the vocab first");
     PI_pw = alloc(PI_MAXEX() * 40);
     PI_un = alloc(PI_MAXEX() * 32);
-    PI_np = 0; PI_nu = 0; PI_skipped = 0;
-    var i = 0;
-    var ls = 0;
-    while (i <= flen) {
-        var atend = 0;
-        if (i == flen) { atend = 1; }
-        elif (load8(buf + i) == 10) { atend = 1; }
-        if (atend == 1) {
-            if (i > ls) {
-                if (_pi_line(buf + ls, i - ls) == 0) { PI_skipped = PI_skipped + 1; }
-            }
-            ls = i + 1;
-        }
-        i = i + 1;
-    }
+    PI_np = 0; PI_nu = 0;
+    _pi_skip_reset();
+    _pi_lines(buf, flen, 2);
     return PI_np + PI_nu;
 }
 
@@ -209,6 +444,7 @@ fn _pi_r(row, k): i64 { return load64(row + k * 8); }
 # ---- gates ---------------------------------------------------------------------
 # mean DPO pair loss + ranking accuracy (Δ>0 count) over the ingested pairs
 fn _pi_dpo_eval(acc_out): i64 {
+    memo_begin();
     var lsum = f64_from(0);
     var right = 0;
     var k = 0;
@@ -220,11 +456,14 @@ fn _pi_dpo_eval(acc_out): i64 {
         if (f64_gt(d, f64_from(0)) == 1) { right = right + 1; }
         k = k + 1;
     }
+    memo_end();
     store64(acc_out, right);
     return f64_div(lsum, f64_from(PI_np));
 }
 
+# mean IPO pair loss + ranking accuracy (h>0 count) over the ingested pairs
 fn _pi_ipo_eval(acc_out): i64 {
+    memo_begin();
     var lsum = f64_from(0);
     var right = 0;
     var k = 0;
@@ -236,12 +475,16 @@ fn _pi_ipo_eval(acc_out): i64 {
         if (f64_gt(h, f64_from(0)) == 1) { right = right + 1; }
         k = k + 1;
     }
+    memo_end();
     store64(acc_out, right);
     return f64_div(lsum, f64_from(PI_np));
 }
 
-# mean KTO log-ratio split by label: out cells get (mean_desirable, mean_undesirable)
+# mean KTO log-ratio split by label: out cells get (mean_desirable, mean_undesirable),
+# 0 for a class with no examples; PI_nD / PI_nU get the class sizes
+var PI_nD = 0; var PI_nU = 0;
 fn _pi_kto_sep(mD_out, mU_out): i64 {
+    memo_begin();
     var sD = f64_from(0); var nD = 0;
     var sU = f64_from(0); var nU = 0;
     var k = 0;
@@ -252,6 +495,8 @@ fn _pi_kto_sep(mD_out, mU_out): i64 {
         else { sU = f64_add(sU, lg); nU = nU + 1; }
         k = k + 1;
     }
+    memo_end();
+    PI_nD = nD; PI_nU = nU;
     if (nD > 0) { store64(mD_out, f64_div(sD, f64_from(nD))); } else { store64(mD_out, f64_from(0)); }
     if (nU > 0) { store64(mU_out, f64_div(sU, f64_from(nU))); } else { store64(mU_out, f64_from(0)); }
     return 0;
@@ -272,7 +517,10 @@ fn _pi_kto_z(): i64 {
 }
 
 # ---- training loops (full-batch over the ingested rows, mirrors dpo_train) -----
+# `epochs` full-batch DPO (use_ipo 0) or IPO (use_ipo 1) steps over the ingested pairs
 fn _pi_train_pairs(epochs, lr, use_ipo): i64 {
+    guard(PI_np >= 1, "_pi_train_pairs: no pairs ingested");
+    memo_begin();
     var invN = f64_div(f64_from(1), f64_from(PI_np));
     var e = 0;
     while (e < epochs) {
@@ -288,16 +536,18 @@ fn _pi_train_pairs(epochs, lr, use_ipo): i64 {
             }
             k = k + 1;
         }
-        t_scale(G_E, g_V * g_D, invN);
-        t_scale(G_W, g_D * g_V, invN);
-        t_scale(G_b, g_V, invN);
+        pol_scale_grads(invN);
         pol_adam_step(lr);
         e = e + 1;
     }
+    memo_end();
     return 0;
 }
 
+# `epochs` full-batch KTO steps over the ingested thumbs, z re-estimated (detached) per epoch
 fn _pi_train_kto(epochs, lr): i64 {
+    guard(PI_nu >= 1, "_pi_train_kto: no unary rows ingested");
+    memo_begin();
     var invN = f64_div(f64_from(1), f64_from(PI_nu));
     var e = 0;
     while (e < epochs) {
@@ -310,37 +560,51 @@ fn _pi_train_kto(epochs, lr): i64 {
               KTO_BETA(), KTO_LAMBDA_D(), KTO_LAMBDA_U(), z);
             k = k + 1;
         }
-        t_scale(G_E, g_V * g_D, invN);
-        t_scale(G_W, g_D * g_V, invN);
-        t_scale(G_b, g_V, invN);
+        pol_scale_grads(invN);
         pol_adam_step(lr);
         e = e + 1;
     }
+    memo_end();
     return 0;
 }
 
 # ---- the driver: tarka --pref <prefs.jsonl> ------------------------------------
 fn tarka_pref_ingest(path): i64 {
-    var buf = alloc(PI_FMAX() + 1);
-    var flen = file_read_all(path, buf, PI_FMAX());
+    var buf = alloc(PI_FMAX() + 2);
+    var flen = file_read_all(path, buf, PI_FMAX() + 1);
     if (flen <= 0) {
-        _pi_puts("tarka: cannot read preference file: "); _pi_puts(path); _pi_puts("\n");
+        rp_puts("tarka: cannot read preference file: "); rp_puts(path); rp_puts("\n");
         return 1;
     }
-    _pi_puts("tarka preference ingestion (ifran pref-export JSONL)\n  file: ");
-    _pi_puts(path); _pi_puts(" ("); fmt_int(flen); _pi_puts(" bytes)\n");
+    if (flen > PI_FMAX()) {
+        rp_puts("tarka: preference file exceeds the "); fmt_int(PI_FMAX());
+        rp_puts("-byte cap; refusing it rather than ingesting part of it: "); rp_puts(path); rp_puts("\n");
+        return 1;
+    }
+    rp_puts("tarka preference ingestion (ifran pref-export JSONL)\n  file: ");
+    rp_puts(path); rp_puts(" ("); fmt_int(flen); rp_puts(" bytes)\n");
 
-    # byte vocab over the whole file -> every field tokenizes; fresh policy
-    var V = corpus_set(buf, flen);
+    # pass 1: the byte vocab over every decoded field byte -> every field tokenizes
+    var text = alloc(flen + 1);
+    var tlen = pref_corpus(buf, flen, text);
+    if (tlen < 1) {
+        rp_puts("  vocab=0  pairs=0  unary=0  skipped="); fmt_int(PI_skipped); _pi_skip_print(); rp_puts("\n");
+        rp_puts("tarka: nothing ingested\n");
+        return 1;
+    }
+    var V = corpus_set(text, tlen);
     pol_init(V, 8, 16, 0, 4242);
     dpo_init();
     dpo_snapshot();                                   # theta == ref at start
     var total = pref_ingest_file(buf, flen);
-    _pi_puts("  vocab="); fmt_int(V);
-    _pi_puts("  pairs="); fmt_int(PI_np);
-    _pi_puts("  unary="); fmt_int(PI_nu);
-    _pi_puts("  skipped="); fmt_int(PI_skipped); _pi_puts("\n");
-    if (total < 1) { _pi_puts("tarka: nothing ingested\n"); return 1; }
+    rp_puts("  vocab="); fmt_int(V);
+    rp_puts("  pairs="); fmt_int(PI_np);
+    rp_puts("  unary="); fmt_int(PI_nu);
+    rp_puts("  skipped="); fmt_int(PI_skipped); _pi_skip_print(); rp_puts("\n");
+    if (pref_skip_count(PI_R_CAP()) > 0) {
+        rp_puts("  note: the per-kind cap of "); fmt_int(PI_MAXEX()); rp_puts(" rows was reached\n");
+    }
+    if (total < 1) { rp_puts("tarka: nothing ingested\n"); return 1; }
 
     var fails = 0;
     var accp = alloc(8);
@@ -350,54 +614,64 @@ fn tarka_pref_ingest(path): i64 {
         # ---- DPO over the ingested pairs ----
         var l0 = _pi_dpo_eval(accp);
         var a0 = load64(accp);
-        _pi_puts("\n--- DPO on "); fmt_int(PI_np); _pi_puts(" ingested pairs ---\n");
-        _pi_puts("  before: mean loss "); _pi_f2(l0);
-        _pi_puts("  ranked-correct "); fmt_int(a0); _pi_puts("/"); fmt_int(PI_np); _pi_puts("\n");
+        rp_puts("\n--- DPO on "); fmt_int(PI_np); rp_puts(" ingested pairs ---\n");
+        rp_puts("  before: mean loss "); print_f2(l0);
+        rp_puts("  ranked-correct "); fmt_int(a0); rp_puts("/"); fmt_int(PI_np); rp_puts("\n");
         _pi_train_pairs(300, lr, 0);
         var l1 = _pi_dpo_eval(accp);
         var a1 = load64(accp);
-        _pi_puts("  after:  mean loss "); _pi_f2(l1);
-        _pi_puts("  ranked-correct "); fmt_int(a1); _pi_puts("/"); fmt_int(PI_np); _pi_puts("\n");
-        if (a1 < PI_np) { fails = fails + 1; _pi_puts("  GATE FAIL: not all pairs ranked correctly\n"); }
-        if (f64_lt(l1, l0) == 0) { fails = fails + 1; _pi_puts("  GATE FAIL: DPO loss did not decrease\n"); }
+        rp_puts("  after:  mean loss "); print_f2(l1);
+        rp_puts("  ranked-correct "); fmt_int(a1); rp_puts("/"); fmt_int(PI_np); rp_puts("\n");
+        if (a1 < PI_np) { fails = fails + 1; rp_puts("  GATE FAIL: not all pairs ranked correctly\n"); }
+        if (f64_lt(l1, l0) == 0) { fails = fails + 1; rp_puts("  GATE FAIL: DPO loss did not decrease\n"); }
 
         # ---- IPO over the same pairs (fresh policy) ----
         pol_init(V, 8, 16, 0, 777);
+        dpo_init();
         dpo_snapshot();
         var i0 = _pi_ipo_eval(accp);
         var b0 = load64(accp);
-        _pi_puts("--- IPO on the same pairs (fresh policy) ---\n");
-        _pi_puts("  before: mean loss "); _pi_f2(i0);
-        _pi_puts("  ranked-correct "); fmt_int(b0); _pi_puts("/"); fmt_int(PI_np); _pi_puts("\n");
+        rp_puts("--- IPO on the same pairs (fresh policy) ---\n");
+        rp_puts("  before: mean loss "); print_f2(i0);
+        rp_puts("  ranked-correct "); fmt_int(b0); rp_puts("/"); fmt_int(PI_np); rp_puts("\n");
         _pi_train_pairs(300, lr, 1);
         var i1 = _pi_ipo_eval(accp);
         var b1 = load64(accp);
-        _pi_puts("  after:  mean loss "); _pi_f2(i1);
-        _pi_puts("  ranked-correct "); fmt_int(b1); _pi_puts("/"); fmt_int(PI_np); _pi_puts("\n");
-        if (b1 < PI_np) { fails = fails + 1; _pi_puts("  GATE FAIL: not all pairs ranked correctly (IPO)\n"); }
-        if (f64_lt(i1, i0) == 0) { fails = fails + 1; _pi_puts("  GATE FAIL: IPO loss did not decrease\n"); }
+        rp_puts("  after:  mean loss "); print_f2(i1);
+        rp_puts("  ranked-correct "); fmt_int(b1); rp_puts("/"); fmt_int(PI_np); rp_puts("\n");
+        if (b1 < PI_np) { fails = fails + 1; rp_puts("  GATE FAIL: not all pairs ranked correctly (IPO)\n"); }
+        if (f64_lt(i1, i0) == 0) { fails = fails + 1; rp_puts("  GATE FAIL: IPO loss did not decrease\n"); }
     }
 
     if (PI_nu > 0) {
         # ---- KTO over the unary thumbs (fresh policy) ----
         pol_init(V, 8, 16, 0, 991);
+        dpo_init();
         dpo_snapshot();
         var mD = alloc(8); var mU = alloc(8);
         _pi_kto_sep(mD, mU);
-        var sep0 = f64_sub(load64(mD), load64(mU));
-        _pi_puts("--- KTO on "); fmt_int(PI_nu); _pi_puts(" unary thumbs (fresh policy) ---\n");
-        _pi_puts("  before: mean log-ratio desirable-undesirable gap "); _pi_f2(sep0); _pi_puts("\n");
+        var d0 = load64(mD); var u0 = load64(mU);
+        rp_puts("--- KTO on "); fmt_int(PI_nu); rp_puts(" unary thumbs ("); fmt_int(PI_nD);
+        rp_puts(" desirable, "); fmt_int(PI_nU); rp_puts(" undesirable; fresh policy) ---\n");
+        rp_puts("  before: mean log-ratio desirable "); print_f2(d0);
+        rp_puts("  undesirable "); print_f2(u0); rp_puts("\n");
         _pi_train_kto(300, lr);
         _pi_kto_sep(mD, mU);
-        var sep1 = f64_sub(load64(mD), load64(mU));
-        _pi_puts("  after:  gap "); _pi_f2(sep1); _pi_puts("\n");
-        if (f64_gt(sep1, sep0) == 0) { fails = fails + 1; _pi_puts("  GATE FAIL: KTO gap did not widen\n"); }
+        var d1 = load64(mD); var u1 = load64(mU);
+        rp_puts("  after:  mean log-ratio desirable "); print_f2(d1);
+        rp_puts("  undesirable "); print_f2(u1); rp_puts("\n");
+        if ((PI_nD > 0) && (f64_gt(d1, d0) == 0)) {
+            fails = fails + 1; rp_puts("  GATE FAIL: KTO did not raise the desirable mean log-ratio\n");
+        }
+        if ((PI_nU > 0) && (f64_lt(u1, u0) == 0)) {
+            fails = fails + 1; rp_puts("  GATE FAIL: KTO did not lower the undesirable mean log-ratio\n");
+        }
     }
 
     if (fails == 0) {
-        _pi_puts("\nRESULT: preference ingestion PASS (all gates green)\n");
+        rp_puts("\nRESULT: preference ingestion PASS (all gates green)\n");
         return 0;
     }
-    _pi_puts("\nRESULT: preference ingestion FAIL ("); fmt_int(fails); _pi_puts(" gates)\n");
+    rp_puts("\nRESULT: preference ingestion FAIL ("); fmt_int(fails); rp_puts(" gates)\n");
     return 1;
 }

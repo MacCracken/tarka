@@ -184,8 +184,10 @@ fn check_ktoblock(P, G, np, st, ac, n, label, beta, lamD, lamU, z): i64 {
 # the reference point; must DIVERGE from the z-detached analytic gradient.
 fn fd_kto_live(P, idx, st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km): i64 {
     var save = load64(P + idx * 8);
-    store64(P + idx * 8, f64_add(save, EPS())); var lp = kto_example_loss_live(st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km);
-    store64(P + idx * 8, f64_sub(save, EPS())); var lm = kto_example_loss_live(st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km);
+    store64(P + idx * 8, f64_add(save, EPS()));
+    var lp = kto_example_loss_live(st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km);
+    store64(P + idx * 8, f64_sub(save, EPS()));
+    var lm = kto_example_loss_live(st, ac, n, label, beta, lamD, lamU, kst, kac, kn, km);
     store64(P + idx * 8, save);
     return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), EPS()));
 }
@@ -300,21 +302,33 @@ fn main() {
     var ppoW = t_alloc(g_D * g_V); t_copy(ppoW, G_W, g_D * g_V);
     pol_zero_grads(); rl_backward(Appo);
     var mrPP = f64_from(0); var pi = 0;
-    while (pi < g_D * g_V) { var re = relerr(load64(ppoW + pi*8), load64(G_W + pi*8)); if (f64_gt(re, mrPP) == 1) { mrPP = re; } pi = pi + 1; }
+    while (pi < g_D * g_V) {
+        var re = relerr(load64(ppoW + pi*8), load64(G_W + pi*8));
+        if (f64_gt(re, mrPP) == 1) { mrPP = re; }
+        pi = pi + 1;
+    }
     show("  PPO rho=1 vs REINFORCE maxrel = ", mrPP);
     assert(f64_lt(mrPP, TOL_EXACT()), "PPO rho=1 seed == advantage-REINFORCE (exact)");
     # (b) FD of the unclipped surrogate (rho=1) wrt P_W == ppo_backward G_W
     var lp0 = load64(R_logpold);
     pol_zero_grads(); ppo_backward();
     var mrPU = f64_from(0); pi = 0;
-    while (pi < g_D * g_V) { var re = relerr(fd_ppo(P_W, pi, 2, 5, lp0, Appo), load64(G_W + pi*8)); if (f64_gt(re, mrPU) == 1) { mrPU = re; } pi = pi + 1; }
+    while (pi < g_D * g_V) {
+        var re = relerr(fd_ppo(P_W, pi, 2, 5, lp0, Appo), load64(G_W + pi*8));
+        if (f64_gt(re, mrPU) == 1) { mrPU = re; }
+        pi = pi + 1;
+    }
     show("  PPO unclipped FD maxrel = ", mrPU);
     assert(f64_lt(mrPU, TOL()), "PPO unclipped surrogate FD grad-check");
     # (c) clipped: rho = exp(+1) ~ 2.718 > 1+eps, A>0 -> binding clip -> X=0 -> G_W all zero
     store64(R_logpold, f64_sub(lp0, f64_from(1)));
     pol_zero_grads(); ppo_backward();
     var maxG = f64_from(0); pi = 0;
-    while (pi < g_D * g_V) { var ag = f64_abs(load64(G_W + pi*8)); if (f64_gt(ag, maxG) == 1) { maxG = ag; } pi = pi + 1; }
+    while (pi < g_D * g_V) {
+        var ag = f64_abs(load64(G_W + pi*8));
+        if (f64_gt(ag, maxG) == 1) { maxG = ag; }
+        pi = pi + 1;
+    }
     show("  PPO clipped max|G_W| = ", maxG);
     assert(f64_lt(maxG, TOL_EXACT()), "PPO binding clip (A>0, rho>1+eps) -> zero gradient");
 
@@ -325,20 +339,26 @@ fn main() {
     assert(f64_lt(relerr(load64(GR_adv + 0*8), f64_from(1)), TOL()), "GRPO {2,1} -> Â_0=+1");
     assert(f64_lt(relerr(load64(GR_adv + 1*8), f64_neg(f64_from(1))), TOL()), "GRPO {2,1} -> Â_1=-1");
     # {0,1,2} (G=3) -> [-sqrt(3/2), 0, +sqrt(3/2)]
-    store64(GR_R + 0*8, f64_from(0)); store64(GR_R + 1*8, f64_from(1)); store64(GR_R + 2*8, f64_from(2)); grpo_group_adv(3);
+    store64(GR_R + 0*8, f64_from(0)); store64(GR_R + 1*8, f64_from(1)); store64(GR_R + 2*8, f64_from(2));
+    grpo_group_adv(3);
     var s32 = f64_sqrt(f64_div(f64_from(3), f64_from(2)));
     assert(f64_lt(relerr(load64(GR_adv + 0*8), f64_neg(s32)), TOL()), "GRPO {0,1,2} -> Â_0=-sqrt(3/2)");
     assert(f64_lt(f64_abs(load64(GR_adv + 1*8)), TOL()), "GRPO {0,1,2} -> Â_1=0");
     assert(f64_lt(relerr(load64(GR_adv + 2*8), s32), TOL()), "GRPO {0,1,2} -> Â_2=+sqrt(3/2)");
     # all-equal -> 0 (no NaN: 0/(0+eps))
-    store64(GR_R + 0*8, f64_from(5)); store64(GR_R + 1*8, f64_from(5)); store64(GR_R + 2*8, f64_from(5)); grpo_group_adv(3);
+    store64(GR_R + 0*8, f64_from(5)); store64(GR_R + 1*8, f64_from(5)); store64(GR_R + 2*8, f64_from(5));
+    grpo_group_adv(3);
     var maxA = f64_from(0); var gi = 0;
     while (gi < 3) { var ag = f64_abs(load64(GR_adv + gi*8)); if (f64_gt(ag, maxA) == 1) { maxA = ag; } gi = gi + 1; }
     assert(f64_lt(maxA, TOL_EXACT()), "GRPO all-equal group -> Â=0 (no NaN)");
     # ratio=1 anchor: fill group row 0 from a rollout, snapshot, grpo_backward(1) == rl_backward(Â)
     rl_rollout(rl_prompt());
     var gt2 = 0;
-    while (gt2 < g_T) { store64(GR_states + gt2*8, load64(R_states + gt2*8)); store64(GR_actions + gt2*8, load64(R_actions + gt2*8)); gt2 = gt2 + 1; }
+    while (gt2 < g_T) {
+        store64(GR_states + gt2*8, load64(R_states + gt2*8));
+        store64(GR_actions + gt2*8, load64(R_actions + gt2*8));
+        gt2 = gt2 + 1;
+    }
     gt2 = 0;
     while (gt2 < g_T) {
         var gx = load64(GR_states + gt2*8); var ga = load64(GR_actions + gt2*8);
@@ -352,7 +372,11 @@ fn main() {
     var grW = t_alloc(g_D * g_V); t_copy(grW, G_W, g_D * g_V);
     pol_zero_grads(); rl_backward(Agr);                # reference over R_states/R_actions (= group row 0)
     var mrGR = f64_from(0); gi = 0;
-    while (gi < g_D * g_V) { var re = relerr(load64(grW + gi*8), load64(G_W + gi*8)); if (f64_gt(re, mrGR) == 1) { mrGR = re; } gi = gi + 1; }
+    while (gi < g_D * g_V) {
+        var re = relerr(load64(grW + gi*8), load64(G_W + gi*8));
+        if (f64_gt(re, mrGR) == 1) { mrGR = re; }
+        gi = gi + 1;
+    }
     show("  GRPO ratio=1 vs REINFORCE maxrel = ", mrGR);
     assert(f64_lt(mrGR, TOL_EXACT()), "GRPO ratio=1 seed == advantage-REINFORCE (exact)");
 
@@ -521,4 +545,4 @@ fn main() {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+sys_exit(exit_code);

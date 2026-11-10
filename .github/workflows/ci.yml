@@ -11,37 +11,247 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token. Nothing here writes to the repository, and when release.yml
+# calls this workflow the called side can only lower the caller's permissions,
+# so the CI gate never holds the release job's contents: write.
+permissions:
+  contents: read
+
 jobs:
-  build-and-test:
+  build:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned 2026-06-19)
+      # Third-party actions are pinned to a full commit SHA (a tag can be moved);
+      # the comment names the release the SHA was taken from (re-verified with
+      # `git ls-remote` on 2026-11-09). persist-credentials false keeps the token
+      # out of .git/config, where the curl | sh installer below could read it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
+        # The toolchain version is the cyrius.cyml [package].cyrius pin — the
+        # single source of truth, never hardcoded here. Hand it to the upstream
+        # install.sh, which lays out $HOME/.cyrius/{bin,lib,versions/<v>}. The
+        # hand-rolled curl+cp-into-bin form is deliberately avoided: it skips
+        # versions/<v>/ and so fails the `cyrius deps` pin-check.
         run: |
           set -e
-          # Upstream install.sh lays out $HOME/.cyrius/{bin,lib,versions/<v>} — the
-          # hand-rolled curl+cp-into-bin form skips versions/<v>/ and so fails the
-          # `cyrius deps` pin-check. Reference: patra / sigil / rosnet.
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-      - name: Resolve dependencies
-        run: cyrius deps
+      - name: Resolve deps
+        # Fetches tyche / rosnet / akshara and vendors the stdlib, then proves
+        # lib/ is exactly what cyrius.lock records.
+        run: |
+          cyrius deps
+          cyrius deps --verify
+          cyrius deps --locked
+
+      - name: Format check
+        run: |
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr tests/abort/*.cyr examples/*.cyr; do
+            cyrius fmt "$f" --check
+          done
+
+      - name: Lint
+        # Hard gate: any warning fails, in src/, tests/ and examples/.
+        run: |
+          fail=0
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr tests/abort/*.cyr examples/*.cyr; do
+            out=$(cyrius lint "$f" 2>&1 || true)
+            echo "$out"
+            if echo "$out" | grep -qE '^[[:space:]]*(warn|error) '; then
+              echo "lint: warnings in $f"; fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+
+      - name: Vet
+        # cyaudit vet: every file the entry includes resolves, and none is
+        # untrusted. Exits 1 on a finding.
+        run: cyrius vet src/main.cyr
+
+      - name: Docs check
+        # Every fn in src/ carries a doc comment.
+        run: |
+          fail=0
+          for f in src/*.cyr; do
+            out=$(cyrius doc --check "$f" 2>&1)
+            echo "$f: $(echo "$out" | tail -1)"
+            if echo "$out" | grep -q 'undocumented:'; then echo "$out"; fail=1; fi
+          done
+          [ $fail -eq 0 ] || { echo "doc: undocumented fns"; exit 1; }
 
       - name: Build
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          cyrius build src/main.cyr build/tarka
+          echo "tarka: $(wc -c < build/tarka) bytes"
 
-      - name: Test
-        # v5.6.28: bare `cyrius test` picks up the [build].test entry
-        # AND auto-discovers tests/*.tcyr — avoids the previous
-        # `cyrius test src/test.cyr` form that hard-failed when the
-        # stub didn't exist (Issue 1) and also wouldn't ever exercise
-        # tests/${proj}.tcyr.
+      - name: Verify ELF
+        run: xxd -l 4 build/tarka | grep -q "7f45 4c46"
+
+      - name: Demo gates
+        # The demo is the integration test: every method trains and its gate must
+        # hold. Exit 0 = ALL GATES PASS.
+        run: ./build/tarka
+
+      - name: --pref gates
+        # The untrusted-input path end to end on a fixture with good, bad and
+        # malformed rows. Exit 0 = DPO / IPO / KTO gates green. Then a file one
+        # byte over the 1 MB cap must be refused (exit 1), not truncated.
+        run: |
+          ./build/tarka --pref tests/fixtures/prefs.jsonl
+          head -c 1048577 /dev/zero | tr '\0' ' ' > build/over_cap.jsonl
+          set +e; ./build/tarka --pref build/over_cap.jsonl > build/over_cap.out 2>&1; rc=$?; set -e
+          cat build/over_cap.out
+          [ $rc -eq 1 ] && grep -q 'exceeds the 1048576-byte cap' build/over_cap.out \
+            || { echo "FAIL: an over-cap file was not refused"; exit 1; }
+          set +e; ./build/tarka --bogus > /dev/null 2>&1; rc=$?; set -e
+          [ $rc -eq 2 ] || { echo "FAIL: an unknown argument did not exit 2 (got $rc)"; exit 1; }
+
+      - name: Quickstart
+        run: |
+          cyrius build examples/quickstart.cyr build/quickstart
+          ./build/quickstart
+
+      - name: Tests
+        # Bare `cyrius test` runs the [build].test entry and tests/*.tcyr:
+        # the grad-check suite, the ingestion suite, the unit suite, and the
+        # golden gate (tests/golden.tcyr), whose digests every refactor and
+        # optimization must keep (docs/adr/0002-optimizations-preserve-bits.md).
         run: cyrius test
+
+      - name: Guards abort
+        # Each tests/abort/*.cyr violates one precondition guard and must exit 1
+        # with the guard's message on stderr, not run on into a corrupting write.
+        run: |
+          mkdir -p build
+          fail=0
+          for f in tests/abort/*.cyr; do
+            cyrius build "$f" build/abort_probe > /dev/null
+            set +e; ./build/abort_probe > build/abort.out 2> build/abort.err; rc=$?; set -e
+            if [ $rc -eq 1 ] && grep -q 'tarka: precondition violated' build/abort.err; then
+              echo "  OK: $f"
+            else
+              echo "  FAIL: $f (exit $rc)"; cat build/abort.out build/abort.err; fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Benchmarks
+        run: CYRIUS_DCE=1 cyrius bench tests/tarka.bcyr
+
+      - name: Fuzz
+        run: |
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build tests/tarka.fcyr build/tarka-fuzz
+          # deterministic property fuzzing (seeded); exit 1 = a property failed
+          timeout 300 ./build/tarka-fuzz || { echo "FUZZ: property failure, crash or timeout"; exit 1; }
+
+  aarch64:
+    name: aarch64 (cross + qemu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Install qemu (user-mode aarch64)
+        # `qemu-user` is the real package on current runner images; its binary is
+        # `qemu-aarch64` (older images named the static build `qemu-aarch64-static`).
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+          QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+          [ -n "$QEMU" ] || { echo "no qemu-aarch64 binary after installing qemu-user"; exit 1; }
+          "$QEMU" --version | head -1
+          echo "QEMU=$QEMU" >> "$GITHUB_ENV"
+
+      - name: Resolve deps
+        run: cyrius deps
+
+      - name: Cross-build + run the suites on aarch64
+        # tests/golden.tcyr carries an aarch64 digest table: aarch64 fuses
+        # rosnet's packed multiply-add, so its bits legitimately differ from
+        # x86_64's — but they must be stable, and the gates must still hold.
+        run: |
+          mkdir -p build
+          for f in tests/*.tcyr; do
+            echo "== $f"
+            cyrius build --aarch64 "$f" build/test_a64
+            "$QEMU" build/test_a64
+          done
+
+      - name: Cross-build + run the demo and --pref on aarch64
+        run: |
+          cyrius build --aarch64 src/main.cyr build/tarka_a64
+          "$QEMU" build/tarka_a64
+          "$QEMU" build/tarka_a64 --pref tests/fixtures/prefs.jsonl
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan for dangerous patterns
+        # Informational. tarka runs no processes and opens one file (the --pref
+        # path, read-only, capped); kept for parity with the sibling repos and to
+        # catch a regression.
+        run: |
+          if grep -rn 'syscall(59' src/ 2>/dev/null | grep -v "# "; then
+            echo "WARN: raw execve"
+          fi
+          if grep -rnE 'sys_system|exec_cmd' src/ 2>/dev/null; then
+            echo "WARN: shell execution"
+          fi
+          if grep -rn '"/etc/' src/ 2>/dev/null; then
+            echo "WARN: hardcoded /etc paths"
+          fi
+          echo "security scan complete"
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check required docs
+        run: |
+          MISSING=0
+          for doc in README.md CHANGELOG.md VERSION LICENSE SECURITY.md cyrius.cyml \
+                     docs/api.md docs/sources.md docs/benchmarks.md docs/development/state.md; do
+            if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
+          done
+          exit $MISSING
+      - name: Verify version consistency
+        run: |
+          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          CYML_RAW=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          # ${file:VERSION} means cyrius.cyml derives its version from VERSION,
+          # the single source of truth.
+          if [ "$CYML_RAW" = "\${file:VERSION}" ]; then
+              CYML_VERSION="$FILE_VERSION"
+          else
+              CYML_VERSION="$CYML_RAW"
+          fi
+          [ "$FILE_VERSION" = "$CYML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_RAW)"; exit 1; }
+          grep -q "^## \[$FILE_VERSION\]" CHANGELOG.md || { echo "version not in changelog"; exit 1; }
+          echo "Version consistent: $FILE_VERSION (cyml: $CYML_RAW)"

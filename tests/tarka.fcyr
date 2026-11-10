@@ -1,16 +1,214 @@
-# tarka fuzz harness
+# tarka fuzz harness — seeded property fuzzing of the --pref ingestion path, the one
+# surface that reads untrusted bytes (src/pref_ingest.cyr).
+#
+# Each round builds a small JSONL file from well-formed pair / unary rows whose text mixes
+# letters, every JSON escape form (\t \n \r \" \\ \/ \b \f \uXXXX, a surrogate pair) and,
+# in some rounds, raw bytes 1..255; then mutates some lines (a flipped, deleted or
+# inserted byte, a truncation, junk around the object, a duplicated key) and runs the
+# driver's pipeline: pref_corpus -> corpus_set -> pol_init -> dpo_init / dpo_snapshot ->
+# pref_ingest_file. Properties, every round:
+#   P1 every stored token id indexes the policy: 0 <= id < g_V, and no well-formed row is
+#      refused for a byte without an id (pass 1 builds the vocab from the same bytes);
+#   P2 ingested + skipped == the file's non-empty lines, and the reasons sum to skipped;
+#   P3 every span has 1 <= n <= PI_NMAX, and no pair's two spans are identical;
+#   P4 at theta == ref every pair's delta and every thumb's log-ratio is exactly 0 — the
+#      canary for a write into the live parameters (the 1.2.1 bug wrote into P_b);
+#   P5 a few epochs of DPO and KTO leave finite losses.
+# A guard firing also fails the run (exit 1). Deterministic: the same seed, the same files.
+#
+#   CYRIUS_DCE=1 cyrius build tests/tarka.fcyr build/tarka-fuzz && ./build/tarka-fuzz
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "lib/akshara.cyr"
+include "src/rl.cyr"
+include "src/actorcritic.cyr"
+include "src/reward.cyr"
+include "src/dpo.cyr"
+include "src/preference_ext.cyr"
+include "src/report.cyr"
+include "src/pref_ingest.cyr"
+
+fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+fn FZ_ROUNDS(): i64 { return 4000; }
+fn FZ_CAP(): i64 { return 16384; }
+
+var FZ_buf = 0; var FZ_len = 0;
+var FZ_seed = 0;          # the generator's own stream (tyche's is reseeded by pol_init)
+
+fn fz_rnd(n): i64 {
+    FZ_seed = FZ_seed ^ (FZ_seed << 13); FZ_seed = FZ_seed ^ (FZ_seed >> 7); FZ_seed = FZ_seed ^ (FZ_seed << 17);
+    return (FZ_seed & 0x7FFFFFFFFFFFFFFF) % n;
+}
+fn fz_put(c): i64 { if (FZ_len < FZ_CAP() - 8) { store8(FZ_buf + FZ_len, c); FZ_len = FZ_len + 1; } return 0; }
+fn fz_puts(s): i64 { var i = 0; while (load8(s + i) != 0) { fz_put(load8(s + i)); i = i + 1; } return 0; }
+
+# a quoted JSON string of 0..11 items: letters, escapes, and (raw = 1) raw bytes
+fn fz_text(raw): i64 {
+    fz_put(34);
+    var n = fz_rnd(12); var i = 0;
+    while (i < n) {
+        var k = fz_rnd(10);
+        if (k < 6) { fz_put(load8("abcdefgh ij.,!?" + fz_rnd(15))); }
+        elif (k < 9) {
+            var e = fz_rnd(12);
+            if (e == 0) { fz_puts("\\t"); } elif (e == 1) { fz_puts("\\n"); } elif (e == 2) { fz_puts("\\r"); }
+            elif (e == 3) { fz_puts("\\\""); } elif (e == 4) { fz_puts("\\\\"); } elif (e == 5) { fz_puts("\\/"); }
+            elif (e == 6) { fz_puts("\\b"); } elif (e == 7) { fz_puts("\\f"); } elif (e == 8) { fz_puts("\\u0041"); }
+            elif (e == 9) { fz_puts("\\u00e9"); } elif (e == 10) { fz_puts("\\u20ac"); }
+            else { fz_puts("\\ud83d\\ude00"); }
+        } elif (raw == 1) {
+            var c = 1 + fz_rnd(255);
+            if ((c == 10) || (c == 34) || (c == 92)) { c = 120; }
+            fz_put(c);
+        } else { fz_put(120); }
+        i = i + 1;
+    }
+    fz_put(34);
     return 0;
 }
 
-fn main() {
+# one row, then (30% of lines) one mutation of it, then LF
+fn fz_line(raw): i64 {
+    var start = FZ_len;
+    var kind = fz_rnd(10);
+    if (kind < 5) {
+        fz_puts("{\"kind\":\"pair\",\"prompt\":"); fz_text(raw);
+        fz_puts(",\"chosen\":"); fz_text(raw); fz_puts(",\"rejected\":"); fz_text(raw); fz_puts("}");
+    } elif (kind < 9) {
+        fz_puts("{\"kind\":\"unary\",\"prompt\":"); fz_text(raw); fz_puts(",\"completion\":"); fz_text(raw);
+        var l = fz_rnd(10);
+        if (l < 4) { fz_puts(",\"label\":1}"); } elif (l < 8) { fz_puts(",\"label\":-1}"); }
+        elif (l == 8) { fz_puts(",\"label\":\"1\"}"); } else { fz_puts(",\"label\":0.5}"); }
+    } else { fz_puts("{\"kind\":\"other\",\"prompt\":"); fz_text(raw); fz_puts("}"); }
+    var len = FZ_len - start;
+    if ((fz_rnd(10) < 3) && (len > 0)) {
+        var op = fz_rnd(6);
+        var pos = start + fz_rnd(len);
+        if (op == 0) {                                          # flip a byte
+            var c = 1 + fz_rnd(255); if (c == 10) { c = 11; } store8(FZ_buf + pos, c);
+        } elif (op == 1) {                                      # delete a byte
+            var j = pos; while (j < FZ_len - 1) { store8(FZ_buf + j, load8(FZ_buf + j + 1)); j = j + 1; }
+            FZ_len = FZ_len - 1;
+        } elif (op == 2) {                                      # insert a byte
+            var j2 = FZ_len; while (j2 > pos) { store8(FZ_buf + j2, load8(FZ_buf + j2 - 1)); j2 = j2 - 1; }
+            var c2 = 1 + fz_rnd(255); if (c2 == 10) { c2 = 11; } store8(FZ_buf + pos, c2);
+            FZ_len = FZ_len + 1;
+        } elif (op == 3) { FZ_len = pos; }                      # truncate
+        elif (op == 4) { fz_puts("junk"); }                     # junk after the object
+        else { FZ_len = FZ_len - 1; fz_puts(",\"prompt\":\"dup\"}"); }   # a duplicated key
+    }
+    fz_put(10);
+    return 0;
+}
+
+# the number of non-empty LF-separated lines in buf[0..n)
+fn fz_lines(buf, n): i64 {
+    var c = 0; var i = 0; var ls = 0;
+    while (i <= n) {
+        var atend = 0;
+        if (i == n) { atend = 1; } elif (load8(buf + i) == 10) { atend = 1; }
+        if (atend == 1) { if (i > ls) { c = c + 1; } ls = i + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+var FZ_fail = 0;
+fn fz_check(round, cond, what): i64 {
+    if (cond == 0) {
+        rp_puts("FUZZ FAIL round "); fmt_int(round); rp_puts(": "); rp_puts(what); rp_puts("\n--- input ---\n");
+        print(FZ_buf, FZ_len); rp_puts("--- end ---\n");
+        FZ_fail = 1;
+    }
+    return 0;
+}
+
+fn fz_ids_ok(base, n): i64 {
+    var t = 0;
+    while (t < n) { var id = load64(base + t * 8); if ((id < 0) || (id >= g_V)) { return 0; } t = t + 1; }
+    return 1;
+}
+
+fn fz_finite(x): i64 { if (((x >> 52) & 2047) == 2047) { return 0; } return 1; }
+
+fn fz_round(round): i64 {
+    FZ_len = 0;
+    var raw = 0; if (fz_rnd(4) == 0) { raw = 1; }
+    var nl = 1 + fz_rnd(8); var i = 0;
+    while (i < nl) { fz_line(raw); i = i + 1; }
+    if (fz_rnd(4) == 0) { FZ_len = FZ_len - 1; }               # sometimes no final LF
+    var text = alloc(FZ_len + 1);
+    var tl = pref_corpus(FZ_buf, FZ_len, text);
+    fz_check(round, tl <= FZ_len, "P0 decoded text outgrew the file");
+    if (tl < 1) { return 0; }
+    var V = corpus_set(text, tl);
+    pol_init(V, 4, 4, 0, 100 + round); dpo_init(); dpo_snapshot();
+    var total = pref_ingest_file(FZ_buf, FZ_len);
+    fz_check(round, total == PI_np + PI_nu, "ingested count");
+    fz_check(round, PI_np + PI_nu + PI_skipped == fz_lines(FZ_buf, FZ_len), "P2 ingested + skipped == lines");
+    var sum = 0; var r = 1;
+    while (r <= PI_NREASON()) { sum = sum + pref_skip_count(r); r = r + 1; }
+    fz_check(round, sum == PI_skipped, "P2 reasons sum to skipped");
+    fz_check(round, pref_skip_count(PI_R_VOCAB()) == 0, "P1 a byte of a well-formed row has no token id");
+    var k = 0;
+    while (k < PI_np) {
+        var row = PI_pw + k * 40; var n = load64(row + 32);
+        fz_check(round, (n >= 1) && (n <= PI_NMAX()), "P3 pair span length");
+        var j = 0;
+        while (j < 4) {
+            fz_check(round, fz_ids_ok(load64(row + j * 8), n), "P1 pair token id out of range");
+            j = j + 1;
+        }
+        var same = _pi_same(load64(row), load64(row + 8), load64(row + 16), load64(row + 24), n);
+        fz_check(round, same == 0, "P3 identical spans");
+        var d = dpo_delta(load64(row), load64(row + 8), load64(row + 16), load64(row + 24), n, DPO_BETA());
+        fz_check(round, d == 0, "P4 delta bits != +0 at theta == ref");
+        k = k + 1;
+    }
+    k = 0;
+    while (k < PI_nu) {
+        var urow = PI_un + k * 32; var un = load64(urow + 16);
+        fz_check(round, (un >= 1) && (un <= PI_NMAX()), "P3 unary span length");
+        fz_check(round, fz_ids_ok(load64(urow), un), "P1 unary state out of range");
+        fz_check(round, fz_ids_ok(load64(urow + 8), un), "P1 unary action out of range");
+        var lr0 = kto_logratio(load64(urow), load64(urow + 8), un);
+        fz_check(round, lr0 == 0, "P4 log-ratio bits != +0 at theta == ref");
+        k = k + 1;
+    }
+    var lr = f64_div(f64_from(5), f64_from(100));
+    if (PI_np > 0) {
+        _pi_train_pairs(3, lr, 0);
+        var acc = alloc(8);
+        fz_check(round, fz_finite(_pi_dpo_eval(acc)), "P5 DPO loss not finite");
+    }
+    if (PI_nu > 0) {
+        _pi_train_kto(3, lr);
+        fz_check(round, fz_finite(_pi_kto_z()), "P5 KTO reference point not finite");
+    }
+    return 0;
+}
+
+fn main(): i64 {
     alloc_init();
-    fuzz_main("test", 4);
-    println("fuzz: ok");
+    FZ_buf = alloc(FZ_CAP());
+    FZ_seed = 88172645463325252;
+    var ingested = 0; var skipped = 0;
+    var round = 0;
+    while (round < FZ_ROUNDS()) {
+        fz_round(round);
+        if (FZ_fail == 1) { return 1; }
+        ingested = ingested + PI_np + PI_nu; skipped = skipped + PI_skipped;
+        round = round + 1;
+    }
+    rp_puts("fuzz: "); fmt_int(FZ_ROUNDS()); rp_puts(" rounds ok (");
+    fmt_int(ingested); rp_puts(" rows ingested, "); fmt_int(skipped); rp_puts(" refused)\n");
     return 0;
 }
 
 var r = main();
-syscall(60, r);
+sys_exit(r);

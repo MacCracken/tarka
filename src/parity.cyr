@@ -15,14 +15,23 @@
 # Reuses the grad-checked backward (rl_backward / ppo_backward / critic_backward /
 # grpo_backward) — only the REWARD differs from m2.cyr's count reward. Include after m2.cyr.
 
+# parity task: vocab size
 fn BENCH_V(): i64 { return 12; }
+# parity task: embedding dim
 fn BENCH_D(): i64 { return 8; }
+# parity task: rollout length
 fn BENCH_T(): i64 { return 16; }
+# parity task: the action rewarded on even states
 fn BENCH_TGT(): i64 { return 2; }
+# parity task: the action rewarded on odd states
 fn BENCH_DECOY(): i64 { return 3; }
-fn BENCH_THRESH(): i64 { return f64_from(8); }      # mean reward target (optimum ≈ T=16, random ≈ T/V≈1.33)
-fn BENCH_MAXROLL(): i64 { return 6000; }            # cap (not-reached sentinel)
-fn BENCH_EVAL_EVERY(): i64 { return 32; }           # eval cadence in rollouts
+# mean reward target (optimum ≈ T=16, random ≈ T/V≈1.33)
+fn BENCH_THRESH(): i64 { return f64_from(8); }
+# cap (not-reached sentinel)
+fn BENCH_MAXROLL(): i64 { return 6000; }
+# eval cadence in rollouts
+fn BENCH_EVAL_EVERY(): i64 { return 32; }
+# parity task: seeds per median
 fn BENCH_NSEED(): i64 { return 5; }
 
 var g_decoy = 0;
@@ -34,24 +43,32 @@ fn par_rw(x, a): i64 {
     if (a == g_decoy)  { if (par == 1) { return f64_from(1); } return f64_from(0); }
     return f64_from(0);
 }
-fn par_rollout_reward(): i64 {                            # terminal sum over the rollout
+# terminal sum over the rollout
+fn par_rollout_reward(): i64 {
     var s = f64_from(0); var t = 0;
     while (t < g_T) { s = f64_add(s, par_rw(load64(R_states + t*8), load64(R_actions + t*8))); t = t + 1; }
     return s;
 }
-fn par_fill_rewards(): i64 {                         # per-step into R_rewards (for GAE)
+# per-step into R_rewards (for GAE)
+fn par_fill_rewards(): i64 {
     var t = 0;
     while (t < g_T) { store64(R_rewards + t*8, par_rw(load64(R_states + t*8), load64(R_actions + t*8))); t = t + 1; }
     return 0;
 }
-fn par_eval(nroll): i64 {                            # mean terminal reward over fresh rollouts (measurement)
+# mean terminal reward over fresh rollouts (measurement)
+fn par_eval(nroll): i64 {
+    guard(nroll >= 1, "par_eval: nroll must be >= 1");
+    memo_begin();
     var sum = f64_from(0); var k = 0;
     while (k < nroll) { rl_rollout(rl_prompt()); sum = f64_add(sum, par_rollout_reward()); k = k + 1; }
+    memo_end();
     return f64_div(sum, f64_from(nroll));
 }
 
 # ---- one training step per method (returns rollouts consumed) ----------------
 fn par_reinforce_step(B, lr): i64 {                  # terminal reward, EMA baseline
+    guard(B >= 1, "par_reinforce_step: B must be >= 1 (0 scales the gradient by 1/0)");
+    memo_begin();
     pol_zero_grads();
     var invB = f64_div(f64_from(1), f64_from(B));
     var rsum = f64_from(0); var bi = 0;
@@ -62,47 +79,37 @@ fn par_reinforce_step(B, lr): i64 {                  # terminal reward, EMA base
         rsum = f64_add(rsum, R);
         bi = bi + 1;
     }
-    t_scale(G_W, g_D*g_V, invB); t_scale(G_b, g_V, invB); t_scale(G_E, g_V*g_D, invB);
+    pol_scale_grads(invB);
     pol_adam_step(lr);
     var meanR = f64_mul(rsum, invB);
     g_baseline = f64_add(f64_mul(RL_BETA(), g_baseline), f64_mul(f64_sub(f64_from(1), RL_BETA()), meanR));
+    memo_end();
     return B;
 }
-fn par_ppo_step(epochs, lr): i64 {                   # per-step GAE advantage + critic, multi-epoch
-    var invT = f64_div(f64_from(1), f64_from(g_T));
+# per-step GAE advantage + critic, multi-epoch
+fn par_ppo_step(epochs, lr): i64 {
+    ac_ready("par_ppo_step: call ac_init() after pol_init()");
+    memo_begin();
     rl_rollout(rl_prompt());
     par_fill_rewards(); gae_values(); gae_advantages(); gae_normalize();
-    ppo_snapshot();
-    var e = 0;
-    while (e < epochs) {
-        pol_zero_grads(); val_zero_grads();
-        ppo_backward(); critic_backward(VAL_COEF());
-        ac_scale_grads(invT);
-        pol_adam_step(lr); critic_adam_step(lr);
-        e = e + 1;
-    }
+    ppo_update(epochs, lr);
+    memo_end();
     return 1;
 }
-fn par_grpo_step(G, lr): i64 {                        # group-relative baseline, no critic
+# group-relative baseline, no critic
+fn par_grpo_step(G, lr): i64 {
     guard((G >= 1) && (G <= GMAX()), "par_grpo_step: group size G out of range (1..GMAX)");
-    var invN = f64_div(f64_from(1), f64_from(G * g_T));
+    ac_ready("par_grpo_step: call ac_init() after pol_init()");
+    memo_begin();
     var g = 0;
     while (g < G) {
         rl_rollout(rl_prompt());
-        var t = 0;
-        while (t < g_T) {
-            var base = (g*g_T + t)*8;
-            var xt = load64(R_states + t*8); var at = load64(R_actions + t*8);
-            store64(GR_states + base, xt); store64(GR_actions + base, at);
-            pol_logits(xt); pol_softmax();
-            store64(GR_oldlp + base, f64_ln(load64(S_probs + at*8)));
-            t = t + 1;
-        }
+        grpo_collect(g);
         store64(GR_R + g*8, par_rollout_reward());
         g = g + 1;
     }
-    grpo_group_adv(G);
-    pol_zero_grads(); grpo_backward(G, invN); pol_adam_step(lr);
+    grpo_update(G, lr);
+    memo_end();
     return G;
 }
 
@@ -110,6 +117,12 @@ fn par_grpo_step(G, lr): i64 {                        # group-relative baseline,
 # rollouts-to-threshold for (method, param, lr, seed); BENCH_MAXROLL if not reached.
 # method: 0 REINFORCE (param=batch), 1 PPO (param=epochs), 2 GRPO (param=group).
 fn eff_run(method, param, lr, seed): i64 {
+    memo_begin();
+    var r = _eff_run(method, param, lr, seed);
+    memo_end();
+    return r;
+}
+fn _eff_run(method, param, lr, seed): i64 {
     pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), seed); ac_init();
     g_decoy = BENCH_DECOY();
     g_datalen = 0;                                   # synthetic prompts (rng % V), balanced parity

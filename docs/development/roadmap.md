@@ -127,6 +127,21 @@ the remaining versions are about finish quality.
   - **1.1.2 (2026-07-05): `--pref` preference-file ingestion** (`src/pref_ingest.cyr`) — trains
     DPO/IPO/KTO from an ifran `pref export` JSONL (curated preferences in, aligned policy out;
     ifran Lane 3 closed). E2E proven: DPO/IPO ranked 3/3 with loss → 0, KTO gap 0 → 238.
+- **1.1.3 – 1.2.1 — toolchain and substrate realigns** (cyrius 6.5.27 → 6.7.18; tyche / rosnet /
+  akshara to their 1.x releases). No method change.
+- **1.2.2 (2026-11-09) — ✅ P(-1) sweep** ([audit](../audit/2026-11-09-audit.md)): the first audit
+  of `--pref` (one HIGH — an escape-decoded byte's id −1 indexed the policy — and four MEDIUM,
+  fixed), the IPO/KTO gate counted, `ipo_mean_h` ties, guards for 0 knobs and stale dims, shared
+  kernels and a per-state distribution memo (bit-identical, demo 3.5× faster), a golden gate,
+  suites 73 → 190, a fuzz harness, and CI that runs every gate on x86_64 and aarch64.
+
+## Next candidates (each a labeled behavior change — they move bits, ADR 0002)
+
+- **Per-state aggregated backward.** `linear_bwd` now dominates a training step; summing each
+  state's seeds before one backward per state would cut it by the batch's repetition factor, but
+  reorders the gradient's sums.
+- **Two-length DPO / IPO primitive.** Score each side of a pair at its own length instead of the
+  shared minimum (the standard DPO objective); changes every unequal pair's training.
 
 ## Out of scope (for v1.0)
 

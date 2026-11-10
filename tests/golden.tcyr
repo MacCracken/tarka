@@ -1,0 +1,239 @@
+# tarka — golden-output gate. Every trainer and inference path runs at a reduced size,
+# and the raw bits of what it leaves behind (parameters, optimizer moments, metrics, the
+# RNG state, forward-pass counts) fold into one FNV-1a digest per case. The digests were
+# recorded on 1.2.1 (cyrius 6.7.18, x86_64). A refactor or optimization that keeps every
+# bit keeps every digest; anything that moves one bit, or draws one random number more or
+# less, fails here. See docs/adr/0002-optimizations-preserve-bits.md.
+#
+# A deliberate behavior change re-records only the cases it touches, and says so in the
+# CHANGELOG. 1.2.2 re-recorded two: "ipo metric" (ipo_mean_h skips ties) and "pref ingest"
+# (the vocab covers decoded field bytes; skip reasons are counted). Parameter digests and
+# metric digests are kept apart so a metric-only fix (e.g. a corrected average) cannot hide
+# a training change.
+
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "lib/akshara.cyr"
+include "src/rl.cyr"
+include "src/actorcritic.cyr"
+include "src/parity.cyr"
+include "src/reward.cyr"
+include "src/dpo.cyr"
+include "src/preference_ext.cyr"
+include "src/preference.cyr"
+include "src/reasoning.cyr"
+include "src/search.cyr"
+include "src/report.cyr"
+include "src/pref_ingest.cyr"
+
+fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+# ---- FNV-1a over 64-bit words -----------------------------------------------
+var g_h = 0;
+fn gh_reset(): i64 { g_h = 0xcbf29ce484222325; return 0; }
+fn gh_word(w): i64 { g_h = (g_h ^ w) * 0x100000001b3; return 0; }
+fn gh_block(p, n): i64 { var i = 0; while (i < n) { gh_word(load64(p + i * 8)); i = i + 1; } return 0; }
+
+# the policy, its gradients' optimizer state, and the RNG
+fn gh_policy(): i64 {
+    gh_block(P_E, g_V * g_D); gh_block(P_W, g_D * g_V); gh_block(P_b, g_V);
+    gh_block(M_E, g_V * g_D); gh_block(V_E, g_V * g_D);
+    gh_block(M_W, g_D * g_V); gh_block(V_W, g_D * g_V);
+    gh_block(M_b, g_V); gh_block(V_b, g_V);
+    gh_word(g_b1t); gh_word(g_b2t); gh_word(g_baseline); gh_word(_rng_state);
+    return 0;
+}
+fn gh_critic(): i64 {
+    gh_block(P_wv, g_D); gh_block(P_bv, 1); gh_block(M_wv, g_D); gh_block(V_wv, g_D);
+    gh_block(M_bv, 1); gh_block(V_bv, 1);
+    return 0;
+}
+fn gh_rm(): i64 {
+    gh_block(P_Er, g_V * g_D); gh_block(P_Wr, g_D * g_V); gh_block(P_br, g_V);
+    gh_block(M_Er, g_V * g_D); gh_block(V_Er, g_V * g_D); gh_word(g_rb1t); gh_word(g_rb2t);
+    return 0;
+}
+
+fn LR(): i64 { return f64_div(f64_from(5), f64_from(100)); }
+
+# ---- cases ------------------------------------------------------------------
+fn case_reinforce(): i64 {
+    pol_init(10, 8, 12, 3, 101); g_datalen = 0;
+    var m = rl_train(15, 6, LR(), 0);
+    var e = rl_eval(10);
+    gh_reset(); gh_policy(); gh_word(m); gh_word(e);
+    return g_h;
+}
+fn case_ppo(): i64 {
+    pol_init(10, 8, 12, 3, 103); ac_init(); g_datalen = 0;
+    var m = ppo_train(8, 3, LR(), 0);
+    gh_reset(); gh_policy(); gh_critic(); gh_word(m);
+    return g_h;
+}
+fn case_grpo(): i64 {
+    pol_init(10, 8, 12, 3, 104); ac_init(); g_datalen = 0;
+    var m = grpo_train(8, 4, LR(), 0);
+    gh_reset(); gh_policy(); gh_word(m);
+    return g_h;
+}
+fn case_parity(): i64 {
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 105); ac_init();
+    g_decoy = BENCH_DECOY(); g_datalen = 0; g_baseline = f64_from(0);
+    var k = 0;
+    while (k < 3) { par_reinforce_step(4, LR()); par_ppo_step(3, LR()); par_grpo_step(4, LR()); k = k + 1; }
+    var e = par_eval(8);
+    gh_reset(); gh_policy(); gh_critic(); gh_word(e);
+    return g_h;
+}
+fn case_effrun(): i64 {
+    gh_reset();
+    gh_word(eff_run(0, 8, LR(), 1000)); gh_word(eff_run(1, 4, LR(), 1000)); gh_word(eff_run(2, 8, LR(), 1000));
+    gh_policy();
+    return g_h;
+}
+fn case_reward(): i64 {
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 106); ac_init(); rm_init();
+    g_decoy = BENCH_DECOY(); g_datalen = 0;
+    rm_train_prm(15, 8, LR());
+    var a1 = rm_prm_accuracy(40);
+    rm_train_orm(6, 4, LR());
+    var a2 = rm_orm_accuracy(10);
+    var k = 0;
+    while (k < 3) { rm_ppo_step(3, LR()); k = k + 1; }
+    k = 0;
+    while (k < 2) { rm_orm_ppo_step(3, LR()); rm_orm_grpo_step(4, LR()); k = k + 1; }
+    gh_reset(); gh_policy(); gh_critic(); gh_rm(); gh_word(a1); gh_word(a2);
+    return g_h;
+}
+fn case_reasoning(): i64 {
+    reason_setup_q(3);
+    gh_reset();
+    gh_word(reason_verifier_gate(40));
+    gh_word(reason_accuracy(0, 1, 30, 2000)); gh_word(reason_accuracy(1, 4, 30, 2000));
+    gh_word(reason_best_of_n(0, 4, 20, 2000)); gh_word(reason_best_of_n(1, 4, 20, 2000));
+    gh_word(reason_best_of_n(2, 4, 20, 2000));
+    gh_policy(); gh_rm();
+    return g_h;
+}
+fn case_search(): i64 {
+    search_setup(); search_init();
+    gh_reset();
+    g_fwd = 0; gh_word(srch_greedy(20, 2000)); gh_word(g_fwd);
+    g_fwd = 0; gh_word(srch_best_of_n(6, 20, 2000)); gh_word(g_fwd);
+    g_fwd = 0; gh_word(srch_beam(4, 4, 20, 2000)); gh_word(g_fwd);
+    gh_rm(); gh_word(_rng_state);
+    return g_h;
+}
+fn case_dpo(): i64 {
+    pol_init(10, 8, 12, 3, 109); dpo_init(); dpo_snapshot(); g_datalen = 0;
+    dpo_train(8, 6, LR());
+    var kl0 = dpo_mean_kl(10);
+    var s = 0;
+    while (s < 3) { kl_penalty_step(DPO_BETA(), LR()); s = s + 1; }   # the demo's KL-to-reference penalty
+    var kl1 = dpo_mean_kl(10);
+    gh_reset(); gh_policy(); gh_word(kl0); gh_word(kl1);
+    return g_h;
+}
+fn case_ipo_train(): i64 {
+    pol_init(10, 8, 12, 3, 110); dpo_init(); dpo_snapshot(); g_datalen = 0;
+    ipo_train(8, 6, LR());
+    gh_reset(); gh_policy();
+    return g_h;
+}
+fn case_ipo_metric(): i64 {
+    pol_init(10, 8, 12, 3, 110); dpo_init(); dpo_snapshot(); g_datalen = 0;
+    var h0 = ipo_mean_h(10);
+    ipo_train(8, 6, LR());
+    var h1 = ipo_mean_h(10);
+    gh_reset(); gh_word(h0); gh_word(h1);
+    return g_h;
+}
+fn case_kto(): i64 {
+    pol_init(10, 8, 12, 3, 111); dpo_init(); dpo_snapshot(); g_datalen = 0;
+    kto_train(8, 6, LR());
+    var rD = kto_mean_rho(10, f64_from(1), 1);
+    var rU = kto_mean_rho(10, f64_from(1), 0);
+    gh_reset(); gh_policy(); gh_word(rD); gh_word(rU);
+    return g_h;
+}
+fn case_corpus(): i64 {
+    var txt = "the quick brown fox jumps over the lazy dog. ";
+    var n = 0; while (load8(txt + n) != 0) { n = n + 1; }
+    var V = corpus_set(txt, n);
+    pol_init(V, 8, 12, load64(g_char2id + 32 * 8), 102);
+    var m = rl_train(10, 6, LR(), 0);
+    var e = rl_eval(8);
+    gh_reset(); gh_word(V); gh_policy(); gh_word(m); gh_word(e);
+    g_datalen = 0;
+    return g_h;
+}
+# the --pref path, step for step as tarka_pref_ingest drives it, at a reduced epoch count
+fn case_pref(): i64 {
+    var buf = alloc(PI_FMAX() + 1);
+    var flen = file_read_all("tests/fixtures/prefs.jsonl", buf, PI_FMAX());
+    if (flen <= 0) { return 0; }
+    var text = alloc(flen + 1);
+    var V = corpus_set(text, pref_corpus(buf, flen, text));
+    pol_init(V, 8, 16, 0, 4242); dpo_init(); dpo_snapshot();
+    var total = pref_ingest_file(buf, flen);
+    gh_reset(); gh_word(V); gh_word(total); gh_word(PI_np); gh_word(PI_nu); gh_word(PI_skipped);
+    var r = 1; while (r <= PI_NREASON()) { gh_word(pref_skip_count(r)); r = r + 1; }
+    var acc = alloc(8);
+    gh_word(_pi_dpo_eval(acc)); gh_word(load64(acc));
+    _pi_train_pairs(30, LR(), 0);
+    gh_word(_pi_dpo_eval(acc)); gh_word(load64(acc)); gh_policy();
+    pol_init(V, 8, 16, 0, 777); dpo_init(); dpo_snapshot();
+    _pi_train_pairs(30, LR(), 1);
+    gh_word(_pi_ipo_eval(acc)); gh_word(load64(acc)); gh_policy();
+    pol_init(V, 8, 16, 0, 991); dpo_init(); dpo_snapshot();
+    _pi_train_kto(30, LR());
+    var mD = alloc(8); var mU = alloc(8);
+    _pi_kto_sep(mD, mU); gh_word(load64(mD)); gh_word(load64(mU)); gh_policy();
+    g_datalen = 0;
+    return g_h;
+}
+
+# ---- driver -----------------------------------------------------------------
+# One table per target: aarch64 fuses rosnet's packed multiply-add (rosnet docs/api.md,
+# "Numerical reproducibility"), so its bits legitimately differ from x86_64's.
+fn on_aarch64(): i64 {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return 1;
+    #endif
+    return 0;
+}
+
+# want_x86 / want_a64: the recorded digests. 0 = not recorded yet: print and fail.
+fn check(name, got, want_x86, want_a64): i64 {
+    var want = want_x86;
+    if (on_aarch64() == 1) { want = want_a64; }
+    if (want == 0) { puts("  RECORD "); puts(name); puts(" 0x"); fmt_hex(got); puts("\n"); }
+    assert_eq(got, want, name);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    check("reinforce", case_reinforce(), 0x84e2418d5c9b65cc, 0x4a01546fa1e2512a);
+    check("ppo", case_ppo(), 0xc5aa76ca6455df, 0xd788d363359e0a8);
+    check("grpo", case_grpo(), 0x9040e9b8aa4830b1, 0xdd5a3e4e6524f1b8);
+    check("parity", case_parity(), 0xd3520ebae291a3d9, 0x79e8d846cb0c81ff);
+    check("eff_run", case_effrun(), 0x7e7b0215017368cc, 0x9e0a515891479497);
+    check("reward", case_reward(), 0xe5a5b5d10599bd6c, 0xe20deeb3197c9cdc);
+    check("reasoning", case_reasoning(), 0xac48cd74484c7985, 0xe83b2b1c717d995f);
+    check("search", case_search(), 0x9b62159799ce5363, 0x9e96dfe034345e45);
+    check("dpo+kl", case_dpo(), 0x393412fb29481321, 0x4168f18fd39d81b0);
+    check("ipo train", case_ipo_train(), 0x778d9aee20a484d3, 0x3a2231837eabe0eb);
+    check("ipo metric", case_ipo_metric(), 0x7608befa05f72821, 0x7608bbfa05f72308);
+    check("kto", case_kto(), 0xd7ad0f770e71cf16, 0xce77111b85b9f916);
+    check("corpus reinforce", case_corpus(), 0xff605f597721a8ec, 0x17f90a93eaba1b6f);
+    check("pref ingest", case_pref(), 0x3a8105a1d1dc0215, 0x141bf3ffd7baca32);
+    return assert_summary();
+}
+
+var r = main();
+sys_exit(r);

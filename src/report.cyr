@@ -1,0 +1,42 @@
+# tarka — report formatting, shared by the demo (src/main.cyr) and the --pref driver
+# (src/pref_ingest.cyr). Self-contained: it writes through the stdlib's print, not the
+# consumer's puts, so any module may include it.
+
+# print a NUL-terminated string
+fn rp_puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+
+# print one byte
+fn rp_putc(ch): i64 { var b[8]; store8(&b, ch); print(&b, 1); return 0; }
+
+# print an f64 with 2 decimals, truncated (not rounded). NaN prints "nan" and the
+# infinities "inf" / "-inf" (their bits as an integer would print as a number).
+fn print_f2(val): i64 {
+    var expo = (val >> 52) & 2047;
+    if (expo == 2047) {
+        if ((val & 0xFFFFFFFFFFFFF) != 0) { rp_puts("nan"); return 0; }
+        if (((val >> 63) & 1) == 1) { rp_puts("-inf"); return 0; }
+        rp_puts("inf"); return 0;
+    }
+    if (((val >> 63) & 1) == 1) { rp_putc(45); val = f64_abs(val); }
+    var fl = f64_floor(val);
+    fmt_int(f64_to(fl));
+    rp_putc(46);
+    var frac = f64_sub(val, fl);
+    var i = 0;
+    while (i < 2) {
+        frac = f64_mul(frac, f64_from(10));
+        var d = f64_floor(frac);
+        fmt_int(f64_to(d));
+        frac = f64_sub(frac, d);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# print a ×100 integer as X.XX (e.g. 1350 -> "13.50", -5 -> "-0.05")
+fn print_cd(v): i64 {
+    if (v < 0) { rp_putc(45); v = 0 - v; }
+    fmt_int(v / 100); rp_putc(46);
+    var f = v % 100; if (f < 10) { rp_putc(48); } fmt_int(f);
+    return 0;
+}

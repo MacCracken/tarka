@@ -1,4 +1,4 @@
-# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2)
+# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2 + v1.2.2)
 
 > Satisfies the v1.0 criterion *"Public RL/reasoning API frozen — every exported symbol
 > documented and tested."*
@@ -8,21 +8,37 @@
 The **stable public API** below is frozen for the 1.x series: signatures and semantics will not
 change without a major version bump. Minor/patch versions may **add** symbols (v1.1.0 added the
 alignment surface — DPO + the RLHF KL penalty in `src/dpo.cyr`; v1.1.1 added IPO + KTO in
-`src/preference_ext.cyr` — without touching any existing signature). Each symbol is exercised by
-the demo (`src/main.cyr`), the grad-check suite (`tests/tarka.tcyr`, 50/50), and/or the quickstart
-consumer (`examples/quickstart.cyr`) — noted per row.
+`src/preference_ext.cyr` — without touching any existing signature). v1.2.2 added
+`pref_corpus` / `pref_skip_count` / `PI_R_*`, `kl_penalty_step` and `src/report.cyr`, changed no
+signature, and tightened three behaviors, each noted in its row: `ipo_mean_h` skips tied draws,
+`reason_verifier_gate` no longer passes when a class is empty, and `--pref` refuses input it used
+to mis-parse. Each symbol is exercised by the demo (`src/main.cyr`), the suites (`tests/tarka.tcyr`
+grad-checks, `tests/pref_ingest.tcyr`, `tests/units.tcyr`, the bit-for-bit `tests/golden.tcyr`),
+and/or the quickstart consumer (`examples/quickstart.cyr`) — noted per row.
 
 **Not frozen (internal):** the per-element optimizer internals (`adam_one`, `*_adam_step`),
 gradient accumulators / zeroers (`*_zero_grads`, `*_backward`, `gae_*`, `ppo_snapshot`,
 `grpo_group_adv`/`grpo_ratio`/`grpo_coeff`), reward-model internals (`rm_logits`,
 `sigma_stable`, `bt_loss`, `rm_accum_seed`, `*_fill`, `orm_bufs`, `rm_sample_to`), the
 matched-compute counting wrappers (`cnt_*`), and module-private helpers (`par_rw`, `RUNI`,
-`reason_oracle`/`reason_answer`, `target_wrong`, `pol_argmax`). These are the reference's
-*mechanism*; they are readable and grad-checked but may change between minor versions.
+`reason_oracle`/`reason_answer`, `target_wrong`, `pol_argmax`). Since v1.2.2 also the shared
+kernels (`softmax_into`, `pol_seed_bwd`, `adam_kernel`, `pol_scale_grads` / `rm_scale_grads`,
+`ppo_update`, `grpo_collect` / `grpo_update`), the distribution memo (`memo_begin` / `memo_end`,
+`pol_dist`, `ref_dist`, the `PM_*` / `RF_*` / `RC_*` tables) and the dims checks (`ac_ready`,
+`dpo_ready`). These are the reference's *mechanism*; they are readable and grad-checked but may
+change between minor versions.
 
-Convention: dimensions/seed are set once by `pol_init` (+ the `*_init` allocators); `g_datalen`
-selects the corpus (`0` = synthetic vocab). All buffers are allocated once in `*_init` and
-reused — see [`benchmarks.md`](benchmarks.md) § Performance notes.
+Convention: dimensions/seed are set by `pol_init`; call each module's `*_init` (`ac_init`,
+`rm_init`, `dpo_init`, `search_init`) after every `pol_init` — their public entries check that the
+dims they were sized for are the current ones and abort (fail loud) when not. `g_datalen` selects
+the corpus (`0` = synthetic vocab). Working buffers are allocated in the `*_init` functions, and a
+few training-loop buffers on first use, re-sized when the rollout length changes; none is
+allocated per step. Inside tarka's own training and evaluation loops the policy's, the frozen
+reference's and the reward model's per-state outputs are cached
+([architecture note 001](architecture/001-distribution-memo.md)); writing `P_*` directly between
+calls (as the grad-checks do) is safe — the next call recomputes. Token arguments outside
+`0..V-1`, a batch or count of 0, and `pol_init` dims below 1 abort with `tarka: precondition
+violated: …`.
 
 ## Policy + REINFORCE — `src/rl.cyr`
 
@@ -33,7 +49,7 @@ reused — see [`benchmarks.md`](benchmarks.md) § Performance notes.
 | `rl_eval(nroll)` → f64 | mean reward over `nroll` rollouts | demo, quickstart |
 | `rl_rollout(prompt)` / `rl_prompt()` → i64 / `rl_reward()` → f64 | sample a rollout / draw a prompt / score the current rollout | demo, suite |
 | `pol_logits(x)` / `pol_softmax()` / `pol_sample()` → i64 | per-step distribution / normalize / sample (custom decoding) | demo, suite |
-| `guard(cond, msg)` | fail-loud precondition guard (prints + `SYS_EXIT`) — the hardening primitive | demo (every guarded entry) |
+| `guard(cond, msg)` | fail-loud precondition guard (prints + `SYS_EXIT`) — the hardening primitive | demo, `tests/abort/` (13 probes) |
 | `ADAM_B1()` `ADAM_B2()` `ADAM_EPS()` `RL_BETA()` | optimizer / baseline hyperparameters | suite |
 
 ## Actor-critic: PPO + GRPO — `src/actorcritic.cyr`
@@ -73,6 +89,7 @@ finite-difference grad-checked (`tests/tarka.tcyr`).
 | `kl_backward_state(x, beta)` | accumulate the β·KL(π_θ‖π_ref) penalty gradient at state `x` | demo, suite |
 | `kl_loss(x, beta)` → f64 / `kl_div_at(x)` → f64 | forward KL penalty / raw KL at a state | demo, suite |
 | `dpo_mean_kl(n)` → f64 | mean KL to the reference over `n` random states | demo |
+| `kl_penalty_step(beta, lr)` | one optimizer step of the KL penalty alone: its gradient at every state, meaned over V, one Adam step (added v1.2.2) | demo, golden |
 | `pol_logp(x, a)` / `ref_logp(x, a)` → f64 | policy / reference log-prob of an action | suite |
 | `DPO_BETA()` | the DPO / penalty temperature β (0.1) | demo, suite |
 
@@ -91,16 +108,16 @@ KTO two-sided z-detachment falsifier.
 |--------|---------|-----------|
 | `ipo_backward_pair(stW, acW, stL, acL, n, beta)` → f64 | one preference pair's IPO gradient `L=(h−1/(2β))²` (returns the loss) | demo, suite |
 | `ipo_pair_loss(stW, acW, stL, acL, n, beta)` → f64 / `ipo_h(...)` → f64 / `ipo_target(beta)` → f64 | forward IPO loss / the bare margin `h` / the target margin `1/(2β)` | demo, suite |
-| `ipo_train(steps, batch, lr)` / `ipo_mean_h(npairs)` → f64 | IPO training from sampled preferences / mean implicit-reward margin | demo |
+| `ipo_train(steps, batch, lr)` / `ipo_mean_h(npairs)` → f64 | IPO training from sampled preferences / mean implicit-reward margin over the preference pairs among `npairs` draws (v1.2.2: a tied draw has no winner and is skipped, as training skips it; 0 if every draw ties) | demo, golden |
 | `IPO_BETA()` → f64 | the IPO regularization strength β (0.5 → target margin 1.0) | demo, suite |
 | `kto_backward_example(states, actions, n, label, beta, lamD, lamU, z)` → f64 | one labeled example's KTO gradient (`label`>0 desirable; returns the loss) | demo, suite |
 | `kto_example_loss(states, actions, n, label, beta, lamD, lamU, z)` → f64 | forward KTO loss `λ(1−σ(u))` with a detached reference point `z` | suite |
 | `kto_logratio(states, actions, n)` → f64 / `kto_zref(kl_st, kl_ac, n, m)` → f64 | bare log-ratio ρ / the detached (clamped ≥0) batch reference point | demo, suite |
-| `kto_train(steps, batch, lr)` / `kto_mean_rho(n, thresh, want_desirable)` → f64 | unpaired KTO training (label by batch-mean count) / mean ρ over a population | demo |
+| `kto_train(steps, batch, lr)` / `kto_mean_rho(n, thresh, want_desirable)` → f64 | unpaired KTO training (label by batch-mean count; `1 ≤ batch ≤ KTO_BMAX()`) / mean ρ over a population | demo / golden |
 | `KTO_BETA()` `KTO_LAMBDA_D()` `KTO_LAMBDA_U()` → f64 | KTO temperature β (0.1) and desirable/undesirable weights (1.0) | demo, suite |
 
 **Not frozen (internal mechanism):** `kto_zref_raw`, `kto_example_loss_live` (the detachment-falsifier
-forward), `ipo_bufs`/`kto_bufs`.
+forward), `kto_bufs` (`ipo_bufs` folded into `dpo_bufs` at v1.2.2).
 
 ## Preference-file ingestion — `src/pref_ingest.cyr` (added v1.1.2, additive)
 
@@ -111,13 +128,15 @@ math — the FD-gated `dpo_backward_pair` / `ipo_backward_pair` /
 
 | symbol | purpose | tested by |
 |--------|---------|-----------|
-| `tarka --pref <prefs.jsonl>` (CLI) | ingest + train + gate DPO/IPO/KTO from an ifran preference export; exit 0 = all gates green | e2e proof, demo |
-| `tarka_pref_ingest(path)` → i64 | the driver behind the flag | suite |
-| `pref_ingest_file(buf, flen)` → i64 | parse JSONL lines into the pair/unary tables (corpus + policy must be initialized); returns rows ingested | suite |
-| `PI_NMAX()` `PI_MAXEX()` `PI_FMAX()` | caps: 48 (state,action) pairs/sequence · 256 rows/kind · 1 MB file | suite |
+| `tarka --pref <prefs.jsonl>` (CLI) | ingest + train + gate DPO/IPO/KTO from an ifran preference export; exit 0 = all gates green, 1 = unreadable / over the cap / nothing ingested / a gate failed, 2 = a usage error | CI, golden |
+| `tarka_pref_ingest(path)` → i64 | the driver behind the flag | CI |
+| `pref_corpus(buf, flen, dst)` → i64 | pass 1 (added v1.2.2): write the decoded text of every well-formed row to `dst` (≥ `flen` bytes) and return its length; `corpus_set` over it gives a byte vocab with an id for every byte pass 2 tokenizes | suite, golden, fuzz |
+| `pref_ingest_file(buf, flen)` → i64 | pass 2: parse JSONL lines into the pair/unary tables and return the rows ingested. Needs a byte vocab (`corpus_set`, over `pref_corpus`'s text) and a policy over it (`pol_init` with that V) — guarded. A line is accepted only as one JSON object whose `kind` is the string `"pair"` / `"unary"`, whose text fields are JSON strings (full RFC 8259 escapes, `\uXXXX` → UTF-8) and whose unary `label` is the bare number `1` or `-1` (v1.2.2) | suite, golden, fuzz |
+| `pref_skip_count(r)` → i64 / `PI_R_*()` / `PI_NREASON()` | rows refused for reason `r` (added v1.2.2): `PI_R_MALFORMED` 1, `PI_R_FIELD` 2, `PI_R_ESCAPE` 3, `PI_R_LABEL` 4, `PI_R_KIND` 5, `PI_R_EMPTY` 6, `PI_R_SAME` 7 (a pair whose two spans are identical), `PI_R_CAP` 8, `PI_R_VOCAB` 9 (a byte without a token id); `PI_skipped` is their sum | suite, fuzz |
+| `PI_NMAX()` `PI_MAXEX()` `PI_FMAX()` | caps: 48 (state,action) pairs/sequence · 256 rows/kind · 1 MB file (a larger file is refused, v1.2.2) | suite, CI |
 
-**Not frozen (internal mechanism):** `_pi_*` (unescape, tokenize, sequence
-shaping, eval/train loops, row accessors) and the `PI_*` tables.
+**Not frozen (internal mechanism):** `_pi_*` (parse, unescape, tokenize, sequence
+shaping, eval/train loops, row accessors), the `PR_*` parsed-row cells and the `PI_*` tables.
 
 ## Parity task + sample-efficiency benchmark — `src/parity.cyr`
 
@@ -136,19 +155,33 @@ shaping, eval/train loops, row accessors) and the `PI_*` tables.
 | `reason_self_consistency(p, N)` → i64 | majority-vote answer over `N` rollouts | demo |
 | `reason_accuracy(method, N, nprompts, base_seed)` → i64 | answer accuracy ‰ (`method` 0 = single, 1 = self-consistency) | demo |
 | `reason_best_of_n(mode, N, nprompts, base_seed)` → i64 | true reward ×100 (`mode` 0 mean / 1 verifier-selected / 2 oracle) | demo |
-| `reason_verifier_gate(n)` → i64 | 1 if the verifier ranks correct above wrong | demo |
+| `reason_verifier_gate(n)` → i64 | 1 if the verifier ranks correct above wrong; 0 if either class is empty (v1.2.2; it returned 1) | demo, golden |
 | `REASON_V/D/T/TGT/DECOY/STEPS()` | reasoning-task configuration | demo |
 
 ## Verifier-guided search — `src/search.cyr`
 
 | symbol | purpose | tested by |
 |--------|---------|-----------|
-| `search_setup()` / `search_init()` | set up the search task + verifier / allocate the beam buffers | demo |
+| `search_setup()` / `search_init()` | set up the search task + verifier (and, since v1.2.2, the beam buffers) / allocate the beam buffers for the current `g_T` | demo, units |
 | `srch_greedy(nprompts, base_seed)` → i64 | greedy-decode baseline, mean #TARGET ×100 | demo |
 | `srch_best_of_n(N, nprompts, base_seed)` → i64 | best-of-N (verifier-selected), mean #TARGET ×100 | demo |
 | `srch_beam(B, K, nprompts, base_seed)` → i64 | PRM-guided beam search; `1 ≤ B ≤ BMAX()`, `B*K ≤ BMAX()²` | demo |
 | `target_streak(st, ac)` → f64 | the metric (#TARGET in a rollout) | demo |
 | `TARGET()` `SR_V/D/T()` `BMAX()` / `g_fwd` | task config / max beam width / forward-pass counter | demo |
+
+## Report formatting — `src/report.cyr` (added v1.2.2)
+
+| symbol | purpose | tested by |
+|--------|---------|-----------|
+| `print_f2(val)` | print an f64 with 2 decimals (truncated); NaN as `nan`, the infinities as `inf` / `-inf` | demo, CI |
+| `print_cd(v)` | print a ×100 integer as `X.XX` (negatives with a sign) | demo |
+| `rp_puts(s)` / `rp_putc(ch)` | print a NUL-terminated string / one byte through the stdlib | demo |
+
+## Command line
+
+`tarka` runs the demo (exit 0 = all gates pass, 1 = a gate failed); `tarka --pref <file>` runs the
+ingestion driver; `tarka --help` prints usage; any other argument, or `--pref` without exactly one
+file, prints usage and exits 2 (v1.2.2; earlier versions ran the demo).
 
 ## Quickstart
 

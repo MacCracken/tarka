@@ -1,0 +1,245 @@
+# tarka — unit suite: the distribution memo's invalidation rules, the parity / reasoning
+# / search helpers, GAE normalization, GRPO's degenerate group, and the self-resizing
+# buffers. (The grad-checks live in tests/tarka.tcyr, ingestion in tests/pref_ingest.tcyr,
+# the bit-for-bit gate in tests/golden.tcyr.)
+
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "lib/akshara.cyr"
+include "src/rl.cyr"
+include "src/actorcritic.cyr"
+include "src/parity.cyr"
+include "src/reward.cyr"
+include "src/dpo.cyr"
+include "src/preference_ext.cyr"
+include "src/preference.cyr"
+include "src/reasoning.cyr"
+include "src/search.cyr"
+
+fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+fn LR(): i64 { return f64_div(f64_from(5), f64_from(100)); }
+
+# 1 if the V-entry f64 blocks a and b hold the same bits
+fn same_bits(a, b, n): i64 {
+    var i = 0;
+    while (i < n) { if (load64(a + i * 8) != load64(b + i * 8)) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# pi(.|x) computed directly (no memo), into dst
+fn direct_dist(x, dst): i64 { pol_logits(x); pol_softmax(); t_copy(dst, S_probs, g_V); return 0; }
+
+# ---- the memo ---------------------------------------------------------------------
+fn test_memo_hit_equals_compute(): i64 {
+    pol_init(9, 4, 6, 2, 11); g_datalen = 0;
+    var want = t_alloc(9); var got = t_alloc(9);
+    memo_begin();
+    var x = 0; var ok = 1;
+    while (x < 9) {
+        pol_dist(x); t_copy(got, S_probs, 9);            # miss: fills row x
+        pol_dist(x);                                     # hit
+        if (same_bits(got, S_probs, 9) == 0) { ok = 0; }
+        x = x + 1;
+    }
+    memo_end();
+    x = 0;
+    while (x < 9) {
+        direct_dist(x, want);
+        memo_begin(); pol_dist(x); memo_end();
+        if (same_bits(want, S_probs, 9) == 0) { ok = 0; }
+        x = x + 1;
+    }
+    assert_eq(ok, 1, "memo: a hit has the bits of a fresh computation");
+    return 0;
+}
+
+fn test_memo_adam_retires_rows(): i64 {
+    pol_init(7, 4, 6, 2, 12); g_datalen = 0;
+    var before = t_alloc(7); var want = t_alloc(7);
+    memo_begin();
+    pol_dist(3); t_copy(before, S_probs, 7);
+    rl_rollout(3); pol_zero_grads(); rl_backward(f64_from(1)); pol_adam_step(LR());
+    pol_dist(3);
+    memo_end();
+    direct_dist(3, want);
+    assert_eq(same_bits(want, S_probs, 7), 1, "memo: after pol_adam_step the row is recomputed");
+    assert_eq(same_bits(before, S_probs, 7), 0, "memo: and the parameters did move it");
+    return 0;
+}
+
+fn test_memo_external_write_between_regions(): i64 {
+    pol_init(7, 4, 6, 2, 13); g_datalen = 0;
+    var want = t_alloc(7);
+    memo_begin(); pol_dist(4); memo_end();               # row 4 cached
+    store64(P_b + 4 * 8, f64_add(load64(P_b + 4 * 8), f64_from(3)));   # a direct write, as the FD checks do
+    direct_dist(4, want);
+    memo_begin(); pol_dist(4); memo_end();
+    assert_eq(same_bits(want, S_probs, 7), 1, "memo: a new region never serves a row filled before it");
+    return 0;
+}
+
+fn test_memo_nesting(): i64 {
+    pol_init(5, 4, 6, 2, 14); g_datalen = 0;
+    memo_begin(); memo_begin(); memo_end();
+    assert_eq(g_memo_depth, 1, "memo: an inner end leaves the outer region open");
+    memo_end();
+    assert_eq(g_memo_depth, 0, "memo: balanced");
+    var e0 = PM_epoch;
+    rl_train(2, 2, LR(), 0);
+    assert_eq(g_memo_depth, 0, "memo: rl_train leaves no region open");
+    assert(PM_epoch > e0, "memo: training advanced the policy version");
+    return 0;
+}
+
+fn test_memo_reference_and_rm(): i64 {
+    pol_init(6, 4, 6, 2, 15); dpo_init(); dpo_snapshot(); rm_init(); g_datalen = 0;
+    var want = t_alloc(6); var before = t_alloc(6);
+    memo_begin();
+    ref_dist(2); t_copy(before, S_refprobs, 6);          # row 2 cached
+    store64(P_b + 2 * 8, f64_from(5));                   # move the policy, then re-snapshot it,
+    dpo_snapshot();                                      # inside the same region
+    ref_dist(2);
+    memo_end();
+    t_copy(want, S_refprobs, 6);
+    ref_logits(2); ref_softmax();
+    assert_eq(same_bits(want, S_refprobs, 6), 1, "memo: dpo_snapshot retires the reference's rows");
+    assert_eq(same_bits(before, want, 6), 0, "memo: and the snapshot did move the reference");
+    memo_begin();
+    var r0 = rm_reward(1, 3);
+    rm_zero_grads(); store64(G_br + 3 * 8, f64_from(1)); rm_adam_step(LR());
+    var r1 = rm_reward(1, 3);
+    memo_end();
+    rm_logits(1);
+    assert_eq(r1, load64(S_rlogits + 3 * 8), "memo: rm_adam_step retires the RM's rows");
+    assert(r1 != r0, "memo: and the RM did move");
+    return 0;
+}
+
+# ---- parity / reasoning / search helpers ------------------------------------------
+fn test_parity_reward(): i64 {
+    pol_init(BENCH_V(), BENCH_D(), BENCH_T(), BENCH_TGT(), 21); g_decoy = BENCH_DECOY(); g_datalen = 0;
+    assert_eq(par_rw(4, BENCH_TGT()), f64_from(1), "even state, target action: 1");
+    assert_eq(par_rw(5, BENCH_TGT()), f64_from(0), "odd state, target action: 0");
+    assert_eq(par_rw(5, BENCH_DECOY()), f64_from(1), "odd state, decoy action: 1");
+    assert_eq(par_rw(4, BENCH_DECOY()), f64_from(0), "even state, decoy action: 0");
+    assert_eq(par_rw(4, 7), f64_from(0), "any other action: 0");
+    assert_eq(par_correct(6), BENCH_TGT(), "par_correct even -> target");
+    assert_eq(par_correct(7), BENCH_DECOY(), "par_correct odd -> decoy");
+    var k = 0; var ok = 1;
+    while (k < 500) { var x = k % BENCH_V(); if (par_wrong(x) == par_correct(x)) { ok = 0; } k = k + 1; }
+    assert_eq(ok, 1, "par_wrong never returns the correct action");
+    rl_rollout(3);
+    var s = f64_from(0); var t = 0;
+    while (t < g_T) { s = f64_add(s, par_rw(load64(R_states + t * 8), load64(R_actions + t * 8))); t = t + 1; }
+    assert_eq(par_rollout_reward(), s, "par_rollout_reward = sum of par_rw");
+    return 0;
+}
+
+fn test_reasoning_answer(): i64 {
+    pol_init(REASON_V(), REASON_D(), REASON_T(), REASON_TGT(), 22);
+    assert_eq(reason_oracle(4), REASON_TGT(), "oracle: even prompt -> TGT");
+    assert_eq(reason_oracle(5), REASON_DECOY(), "oracle: odd prompt -> DECOY");
+    var t = 0;
+    while (t < g_T) { store64(R_states + t * 8, 2 * (t % 3)); t = t + 1; }              # all even
+    assert_eq(reason_answer(), REASON_TGT(), "all-even chain -> TGT");
+    t = 0;
+    while (t < g_T) { store64(R_states + t * 8, 2 * t + 1); t = t + 1; }                # all odd
+    assert_eq(reason_answer(), REASON_DECOY(), "all-odd chain -> DECOY");
+    t = 0;
+    while (t < g_T) { store64(R_states + t * 8, t); t = t + 1; }                        # half and half
+    assert_eq(reason_answer(), REASON_TGT(), "a tie breaks to TGT");
+    return 0;
+}
+
+fn test_search_helpers(): i64 {
+    pol_init(SR_V(), SR_D(), SR_T(), TARGET(), 23); g_datalen = 0;
+    var t = 0;
+    while (t < g_T) { var a = 1; if ((t % 4) == 0) { a = TARGET(); } store64(R_actions + t * 8, a); t = t + 1; }
+    assert_eq(target_streak(R_states, R_actions), f64_from(4), "target_streak counts TARGET actions");
+    t_zero(P_W, g_D * g_V); t_zero(P_b, g_V); store64(P_b + 7 * 8, f64_from(1));
+    assert_eq(pol_argmax(3), 7, "pol_argmax picks the largest logit");
+    return 0;
+}
+
+# beam search with one beam and one child samples exactly as best-of-1: same RNG draws,
+# same actions, same forward count
+fn test_beam_1x1_is_best_of_1(): i64 {
+    search_setup();
+    g_fwd = 0; var b = srch_best_of_n(1, 12, 3000); var fb = g_fwd;
+    g_fwd = 0; var m = srch_beam(1, 1, 12, 3000); var fm = g_fwd;
+    assert_eq(m, b, "beam(1,1) == best-of-1");
+    assert_eq(fm, fb, "beam(1,1) runs the same forward count");
+    return 0;
+}
+
+# ---- GAE / GRPO -------------------------------------------------------------------
+fn test_gae_normalize(): i64 {
+    pol_init(6, 4, 8, 2, 24); ac_init();
+    var t = 0;
+    while (t < g_T) { store64(R_adv + t * 8, f64_from(t * 3 + 1)); t = t + 1; }
+    gae_normalize();
+    var mean = f64_div(t_sum(R_adv, g_T), f64_from(g_T));
+    var var0 = f64_from(0); t = 0;
+    while (t < g_T) { var d = load64(R_adv + t * 8); var0 = f64_add(var0, f64_mul(d, d)); t = t + 1; }
+    var sd = f64_sqrt(f64_div(var0, f64_from(g_T)));
+    var tiny = f64_div(f64_from(1), f64_from(1000000));
+    assert(f64_lt(f64_abs(mean), tiny) == 1, "normalized advantages: mean 0");
+    assert(f64_lt(f64_abs(f64_sub(sd, f64_from(1))), tiny) == 1, "normalized advantages: std 1");
+    t = 0;
+    while (t < g_T) { store64(R_adv + t * 8, f64_from(5)); t = t + 1; }
+    gae_normalize();
+    assert_eq(load64(R_adv + 3 * 8), f64_from(5), "constant advantages: left as they are");
+    return 0;
+}
+
+fn test_grpo_equal_group(): i64 {
+    pol_init(6, 4, 8, 2, 25); ac_init();
+    var g = 0;
+    while (g < 4) { store64(GR_R + g * 8, f64_from(7)); g = g + 1; }
+    grpo_group_adv(4);
+    var ok = 1; g = 0;
+    while (g < 4) { if (f64_eq(load64(GR_adv + g * 8), f64_from(0)) == 0) { ok = 0; } g = g + 1; }
+    assert_eq(ok, 1, "an all-equal group has advantage exactly 0 (no NaN)");
+    return 0;
+}
+
+# ---- buffers follow the rollout length ----------------------------------------------
+fn test_buffers_resize(): i64 {
+    pol_init(8, 4, 4, 2, 26); dpo_init(); dpo_snapshot(); g_datalen = 0;
+    dpo_train(1, 2, LR());
+    assert_eq(DAB_T, 4, "slot buffers sized for T=4");
+    pol_init(8, 4, 20, 2, 27); dpo_init(); dpo_snapshot();
+    dpo_train(1, 2, LR());
+    assert_eq(DAB_T, 20, "slot buffers re-sized for T=20");
+    kto_train(1, 2, LR());
+    assert_eq(KA_T, 20, "KTO batch buffers sized for T=20");
+    pol_init(12, 8, 16, 2, 28); ac_init(); rm_init(); g_decoy = 3;
+    rm_train_orm(1, 2, LR());
+    assert_eq(OAB_T, 16, "ORM rollout-pair buffers sized for T=16");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_memo_hit_equals_compute();
+    test_memo_adam_retires_rows();
+    test_memo_external_write_between_regions();
+    test_memo_nesting();
+    test_memo_reference_and_rm();
+    test_parity_reward();
+    test_reasoning_answer();
+    test_search_helpers();
+    test_beam_1x1_is_best_of_1();
+    test_gae_normalize();
+    test_grpo_equal_group();
+    test_buffers_resize();
+    return assert_summary();
+}
+
+var r = main();
+sys_exit(r);

@@ -11,16 +11,23 @@
 # value of verifier-guided search. Additive; touches nothing (24 grad-checks byte-identical).
 # Include AFTER reasoning.cyr (uses rm_*, pol_*, rl_*, the parity infra).
 
-fn TARGET(): i64 { return 5; }          # the verifier-preferred token (never par_correct, so never the argmax)
+# the verifier-preferred token (never par_correct, so never the argmax)
+fn TARGET(): i64 { return 5; }
+# search task: vocab size
 fn SR_V(): i64 { return 12; }
+# search task: embedding dim
 fn SR_D(): i64 { return 8; }
+# search task: sequence length
 fn SR_T(): i64 { return 16; }
 
 # ---- forward-pass counter (matched-compute budget unit) — wrappers, NOT edits to pol_logits/rm_reward
 var g_fwd = 0;
-fn cnt_logits(x): i64 { g_fwd = g_fwd + 1; pol_logits(x); return 0; }            # 1 policy linear_fwd
-fn cnt_rm(x, a): i64 { g_fwd = g_fwd + 1; return rm_reward(x, a); }              # 1 PRM linear_fwd
-fn cnt_rollout(p): i64 {                                                          # counted rollout (T policy fwds)
+# 1 policy linear_fwd
+fn cnt_logits(x): i64 { g_fwd = g_fwd + 1; pol_logits(x); return 0; }
+# 1 PRM linear_fwd
+fn cnt_rm(x, a): i64 { g_fwd = g_fwd + 1; return rm_reward(x, a); }
+# counted rollout (T policy fwds)
+fn cnt_rollout(p): i64 {
     var x = p; var t = 0;
     while (t < g_T) {
         store64(R_states + t*8, x);
@@ -44,13 +51,17 @@ fn target_streak(st, ac): i64 {
 # ---- the verifier: a PRM trained to prefer TARGET over any other action (winner=(x,TARGET),
 # loser=(x, non-TARGET)). Reuses the reward.cyr Bradley-Terry machinery. Frozen during search.
 var TW1 = 0; var TW2 = 0; var TL1 = 0; var TL2 = 0;
+# a random action other than TARGET
 fn target_wrong(x): i64 {
     guard(g_V >= 2, "target_wrong: g_V must be >= 2 (rejection loop would not terminate)");
     var a = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V;
     while (a == TARGET()) { a = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % g_V; }
     return a;
 }
+# train the search verifier: winner (x, TARGET) over loser (x, any other action)
 fn rm_train_target(steps, batch, lr): i64 {
+    guard(batch >= 1, "rm_train_target: batch must be >= 1");
+    memo_begin();
     if (TW1 == 0) { TW1 = t_alloc(1); TW2 = t_alloc(1); TL1 = t_alloc(1); TL2 = t_alloc(1); }
     var invB = f64_div(f64_from(1), f64_from(batch));
     var s = 0;
@@ -64,10 +75,11 @@ fn rm_train_target(steps, batch, lr): i64 {
             rm_backward_pair(TW1, TW2, TL1, TL2, 1);
             bi = bi + 1;
         }
-        t_scale(G_Er, g_V*g_D, invB); t_scale(G_Wr, g_D*g_V, invB); t_scale(G_br, g_V, invB);
+        rm_scale_grads(invB);
         rm_adam_step(lr);
         s = s + 1;
     }
+    memo_end();
     return 0;
 }
 
@@ -78,6 +90,7 @@ fn search_setup(): i64 {
     pol_init(SR_V(), SR_D(), SR_T(), TARGET(), 7); rm_init();
     g_datalen = 0;
     rm_train_target(300, 16, f64_div(f64_from(5), f64_from(100)));
+    search_init();                       # the beam buffers, sized for this task's T
     return 0;
 }
 
@@ -88,6 +101,7 @@ fn pol_argmax(x): i64 {
     while (v < g_V) { var lv = load64(S_logits + v*8); if (f64_gt(lv, bv) == 1) { bv = lv; best = v; } v = v + 1; }
     return best;
 }
+# greedy-decode baseline: mean #TARGET ×100 over nprompts (1 policy forward per step)
 fn srch_greedy(nprompts, base_seed): i64 {
     guard(nprompts >= 1, "srch_greedy: nprompts must be >= 1");
     rng_seed(base_seed);
@@ -141,18 +155,23 @@ fn BMAX(): i64 { return 16; }
 var BM_st = 0; var BM_ac = 0; var BM_sc = 0;
 var NB_st = 0; var NB_ac = 0; var NB_sc = 0;
 var CH_par = 0; var CH_act = 0; var CH_sc = 0;
+var SI_T = 0;                            # the g_T search_init sized the beam buffers for
+# allocate the beam buffers for BMAX beams of g_T steps (search_setup calls it)
 fn search_init(): i64 {
+    SI_T = g_T;
     BM_st = t_alloc(BMAX() * g_T); BM_ac = t_alloc(BMAX() * g_T); BM_sc = t_alloc(BMAX());
     NB_st = t_alloc(BMAX() * g_T); NB_ac = t_alloc(BMAX() * g_T); NB_sc = t_alloc(BMAX());
     CH_par = t_alloc(BMAX() * BMAX()); CH_act = t_alloc(BMAX() * BMAX()); CH_sc = t_alloc(BMAX() * BMAX());
     return 0;
 }
+# PRM-guided beam search: mean TRUE #TARGET ×100 over nprompts, B beams × K children per depth
 fn srch_beam(B, K, nprompts, base_seed): i64 {
     # hardening (0.8.0): beam/child buffers are fixed at BMAX — a larger B or B*K
     # would silently overrun the heap; B<1/K<1 underflows the -1 candidate sentinel.
     guard((B >= 1) && (B <= BMAX()), "srch_beam: B out of range (1..BMAX)");
     guard((K >= 1) && (B * K <= BMAX() * BMAX()), "srch_beam: B*K exceeds candidate cap (BMAX*BMAX)");
     guard(nprompts >= 1, "srch_beam: nprompts must be >= 1");
+    guard(SI_T == g_T, "srch_beam: call search_init() after pol_init()");
     rng_seed(base_seed);
     var prompts = t_alloc(nprompts);
     var i = 0; while (i < nprompts) { store64(prompts + i*8, rl_prompt()); i = i + 1; }

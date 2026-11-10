@@ -1,7 +1,13 @@
-# tarka — REINFORCE demo (REINFORCE): a minimal rosnet-backed policy learns, by on-policy
-# REINFORCE, to raise a target token's frequency in its own rollouts (the
-# demonstrable RL gate, mirroring attn11's X024). The policy + loop live in
-# src/rl.cyr; this is the driver.
+# tarka — the demo driver: every method in the reference trains or deliberates on a small
+# task and must pass its gate (REINFORCE, PPO, GRPO, the parity sample-efficiency
+# benchmark, learned PRM/ORM rewards, self-consistency and verifier best-of-N, PRM-guided
+# beam search, DPO + the KL penalty, IPO + KTO). Exit 0 = ALL GATES PASS. With
+# `--pref <file>` it trains DPO / IPO / KTO from an ifran preference export instead
+# (src/pref_ingest.cyr).
+#
+#   tarka                     run the demo
+#   tarka --pref <file>       train from a preference export
+#   tarka --help              usage
 
 include "lib/tyche.cyr"    # rng_seed / rng_uniform / rng_u64 / rng_normal
 include "lib/rosnet.cyr"   # linear_fwd / linear_bwd / t_*  (t_randn -> tyche)
@@ -15,56 +21,50 @@ include "src/preference_ext.cyr"  # IPO (margin-regularized) + KTO (unpaired pro
 include "src/preference.cyr"  # reward-model transmission demo (learned reward -> RL -> true reward)
 include "src/reasoning.cyr"  # verifier-guided reasoning (self-consistency, best-of-N)
 include "src/search.cyr"     # PRM-guided tree (beam) search on a sequential task
+include "src/report.cyr"       # print_f2 / print_cd (shared with the --pref driver)
 include "src/pref_ingest.cyr"  # ifran pref-export JSONL ingestion (--pref): DPO/IPO/KTO from curated sets
 
+# akshara's emit hook (consumer-supplied) and the demo's string printer
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+# print a NUL-terminated string (the demo's printer)
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
 
 # akshara's loader/streaming paths (corpus_load_file/stdin, stream_tok) are unused
 # by tarka — we drive the pure tokenizer path (corpus_set/gd_ld) only — so these
 # consumer symbols stay unreached; stub them so the build is warning-free.
 fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+# akshara consumer hook, unused (see above)
 fn read_stdin(buf, cap): i64 { return 0 - 1; }
+# akshara consumer hook, unused (see above)
 fn file_seek(fd, off): i64 { return 0 - 1; }
 
-# print an f64 with 2 decimals
-fn print_f2(val): i64 {
-    if (((val >> 63) & 1) == 1) { _putc(45); val = f64_abs(val); }
-    var fl = f64_floor(val);
-    fmt_int(f64_to(fl));
-    _putc(46);
-    var frac = f64_sub(val, fl);
-    var i = 0;
-    while (i < 2) {
-        frac = f64_mul(frac, f64_from(10));
-        var d = f64_floor(frac);
-        fmt_int(f64_to(d));
-        frac = f64_sub(frac, d);
-        i = i + 1;
-    }
+# print the command-line usage
+fn usage(): i64 {
+    puts("usage: tarka                  run the demo (exit 0 = all gates pass)\n");
+    puts("       tarka --pref <file>    train DPO / IPO / KTO from an ifran `pref export` JSONL file\n");
+    puts("       tarka --help           this message\n");
     return 0;
 }
 
-# print a ×100 integer as X.XX (e.g. 1350 -> "13.50")
-fn print_cd(v): i64 {
-    fmt_int(v / 100); _putc(46);
-    var f = v % 100; if (f < 10) { _putc(48); } fmt_int(f);
-    return 0;
-}
-
+# run the demo, or the --pref driver; returns the exit code
 fn main(): i64 {
     alloc_init();
     # --pref <prefs.jsonl>: train DPO/IPO/KTO from an ifran-curated preference
     # export instead of running the demo suite (ifran Lane 3; src/pref_ingest.cyr)
     args_init();
     if (argc() >= 2) {
+        if ((streq(argv(1), "--help") == 1) || (streq(argv(1), "-h") == 1)) { usage(); return 0; }
         if (streq(argv(1), "--pref") == 1) {
-            if (argc() < 3) {
-                puts("tarka: --pref needs a <prefs.jsonl> (ifran `pref export` file)\n");
-                return 1;
+            if (argc() != 3) {
+                puts("tarka: --pref takes exactly one <prefs.jsonl> (an ifran `pref export` file)\n");
+                usage();
+                return 2;
             }
             return tarka_pref_ingest(argv(2));
         }
+        puts("tarka: unknown argument: "); puts(argv(1)); puts("\n");
+        usage();
+        return 2;
     }
     # real tokenized corpus via akshara (byte-level vocab over a short text)
     var corpus = "the quick brown fox jumps over the lazy dog. ";
@@ -227,15 +227,7 @@ fn main(): i64 {
 
     # KL-to-reference penalty: gradient-descend β·KL(π_θ‖π_ref) to pull the policy back.
     var kstep = 0;
-    while (kstep < 60) {
-        pol_zero_grads();
-        var kj = 0;
-        while (kj < V) { kl_backward_state(kj, DPO_BETA()); kj = kj + 1; }   # penalty over every state
-        var invV = f64_div(f64_from(1), f64_from(V));
-        t_scale(G_E, V * D, invV); t_scale(G_W, D * V, invV); t_scale(G_b, V, invV);
-        pol_adam_step(f64_div(f64_from(5), f64_from(100)));
-        kstep = kstep + 1;
-    }
+    while (kstep < 60) { kl_penalty_step(DPO_BETA(), f64_div(f64_from(5), f64_from(100))); kstep = kstep + 1; }
     var kl_a = dpo_mean_kl(64);
     puts("  KL-to-reference penalty: mean KL "); print_f2(kl_b); puts(" -> "); print_f2(kl_a);
     puts("  (policy pulled back toward reference)"); _putc(10);
@@ -280,11 +272,15 @@ fn main(): i64 {
     var kd1 = kto_logratio(ED_st, ED_ac, T); var ku1 = kto_logratio(EU_st, EU_ac, T);
     puts("  KTO: desirable ρ "); print_f2(kd0); puts(" -> "); print_f2(kd1);
     puts(" ; undesirable ρ "); print_f2(ku0); puts(" -> "); print_f2(ku1); _putc(10);
+    var ext_ok = 0;
     if ((f64_gt(ih1, ih0) == 1) && (f64_gt(kd1, kd0) == 1) && (f64_lt(ku1, ku0) == 1)) {
-        puts("  preference-ext: IPO raises h toward its target margin; KTO raises desirable ρ + lowers undesirable ρ\n");
-    }
+        ext_ok = 1;
+        puts("  preference-ext: IPO raises h toward its target margin; ");
+        puts("KTO raises desirable ρ + lowers undesirable ρ\n");
+    } else { puts("  preference-ext GATE FAIL\n"); }
 
-    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (align_ok == 1)) {
+    if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (align_ok == 1)
+        && (ext_ok == 1)) {
         puts("\n  ALL GATES PASS\n"); return 0;
     }
     puts("\n  GATE FAIL\n");
