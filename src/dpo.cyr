@@ -79,6 +79,24 @@ fn ref_logits(x): i64 {
 # softmax(S_reflogits) -> S_refprobs
 fn ref_softmax(): i64 { return softmax_into(S_reflogits, S_refprobs); }
 
+# the reference's logits table from the device (--gpu), on rl.cyr's pol_miss_logits rules
+var RF_lg = 0; var RF_lgV = 0; var RF_lgtry = 0; var RF_lgok = 0;
+
+# S_reflogits for state x on a memo miss: the device's table when --gpu filled it at this
+# reference version, else linear_fwd on the CPU
+fn ref_miss_logits(x): i64 {
+    if (g_gpu == 1) {
+        if (RF_lgV != g_V) { RF_lg = t_alloc(g_V * g_V); RF_lgV = g_V; RF_lgtry = 0; }
+        if (RF_lgtry != RF_epoch) {
+            RF_lgtry = RF_epoch;
+            RF_lgok = 0;
+            if (dev_table(P_Eref, P_Wref, P_bref, RF_lg) == 0) { RF_lgok = 1; }
+        }
+        if (RF_lgok == 1) { t_copy(S_reflogits, RF_lg + x * g_V * 8, g_V); return 0; }
+    }
+    return ref_logits(x);
+}
+
 # S_refprobs = pi_ref(.|x): computed, or inside a memo region copied from the cache.
 fn ref_dist(x): i64 {
     if (g_memo_depth == 0) { ref_logits(x); ref_softmax(); return 0; }
@@ -87,7 +105,7 @@ fn ref_dist(x): i64 {
     if (RF_seen != g_memo_gen) { RF_epoch = RF_epoch + 1; RF_seen = g_memo_gen; }
     var row = RF_probs + x * g_V * 8;
     if (load64(RF_stamp + x * 8) == RF_epoch) { t_copy(S_refprobs, row, g_V); return 0; }
-    ref_logits(x); ref_softmax();
+    ref_miss_logits(x); ref_softmax();
     t_copy(row, S_refprobs, g_V);
     store64(RF_stamp + x * 8, RF_epoch);
     return 0;

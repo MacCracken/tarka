@@ -337,6 +337,117 @@ fn test_mc_tree_books(): i64 {
     return 0;
 }
 
+# ---- --gpu (1.5.0): the device's logits table -------------------------------
+# a NaN pattern no forward produces: a declined table must still hold it
+fn SENT(): i64 { return 0x7ff8dead00000001; }
+
+# one table on the device against linear_fwd row by row; without a device (or for a
+# shape the device does not take) it is declined and left untouched. Returns dev_table's rc.
+fn dev_table_case(V, D, seed): i64 {
+    pol_init(V, D, 4, 0, seed); g_datalen = 0;
+    t_randn(P_b, V, f64_div(f64_from(1), f64_from(10)));          # a nonzero bias
+    var Y = t_alloc(V * V); var i = 0;
+    while (i < V * V) { store64(Y + i * 8, SENT()); i = i + 1; }
+    var f0 = g_dev_fills; var d0 = g_dev_declined;
+    g_gpu = 1;
+    var rc = dev_table(P_E, P_W, P_b, Y);
+    g_gpu = 0;
+    if (rc == 0) {
+        assert_eq(g_dev_fills, f0 + 1, "dev_table: a fill is counted");
+        var ok = 1; var x = 0;
+        while (x < V) {
+            pol_logits(x);
+            if (same_bits(Y + x * V * 8, S_logits, V) == 0) { ok = 0; }
+            x = x + 1;
+        }
+        assert_eq(ok, 1, "dev_table: every row holds linear_fwd's bits (D padded to the k-tile)");
+    } else {
+        assert_eq(g_dev_declined, d0 + 1, "dev_table: a decline is counted");
+        var un = 1; i = 0;
+        while (i < V * V) { if (load64(Y + i * 8) != SENT()) { un = 0; } i = i + 1; }
+        assert_eq(un, 1, "dev_table: a declined table is left untouched");
+    }
+    return rc;
+}
+
+fn test_dev_table(): i64 {
+    # with a device every one of these shapes must run on it; without one each is declined
+    var have = 0; if (gpu_probe() == 0) { have = 1; }
+    var ran = 0;
+    if (dev_table_case(28, 8, 31) == 0) { ran = ran + 1; }      # the demo's shape: D 8 padded to 16
+    if (dev_table_case(12, 16, 32) == 0) { ran = ran + 1; }     # D on the k-tile: no padding
+    if (dev_table_case(20, 17, 33) == 0) { ran = ran + 1; }     # D 17 padded to 32: two k-tiles
+    assert_eq(ran, have * 3, "dev_table: a present device takes every shape tarka pads");
+    # with g_gpu off nothing reaches the device, and nothing is counted
+    var f0 = g_dev_fills; var d0 = g_dev_declined;
+    assert(dev_table(P_E, P_W, P_b, t_alloc(g_V * g_V)) != 0, "dev_table: g_gpu off declines");
+    assert_eq(g_dev_fills + g_dev_declined, f0 + d0, "dev_table: g_gpu off counts nothing");
+    # V·V past mabda's dispatch cap: declined on every host, device or not
+    assert(dev_table_case(256, 8, 34) != 0, "dev_table: a table past the dispatch cap is declined");
+    return 0;
+}
+
+fn test_dev_memo(): i64 {
+    pol_init(10, 8, 6, 2, 41); dpo_init(); rm_init(); g_datalen = 0;
+    t_randn(P_b, 10, f64_div(f64_from(1), f64_from(10)));
+    dpo_snapshot();
+    store64(P_b + 3 * 8, f64_from(1));                  # the policy moves past its reference
+    var cpu = t_alloc(300); var x = 0;
+    while (x < 10) {
+        direct_dist(x, cpu + x * 80);
+        ref_logits(x); ref_softmax(); t_copy(cpu + 800 + x * 80, S_refprobs, 10);
+        rm_logits(x); t_copy(cpu + 1600 + x * 80, S_rlogits, 10);
+        x = x + 1;
+    }
+    var f0 = g_dev_fills; var d0 = g_dev_declined; var ok = 1;
+    memo_begin();                                       # without --gpu: no table is tried
+    x = 0;
+    while (x < 10) { pol_dist(x); ref_dist(x); rm_reward(x, 0); x = x + 1; }
+    memo_end();
+    assert_eq(g_dev_fills + g_dev_declined, f0 + d0, "--gpu off: a memo region tries no table");
+    g_gpu = 1;
+    memo_begin();
+    x = 0;
+    while (x < 10) {
+        pol_dist(x); if (same_bits(S_probs, cpu + x * 80, 10) == 0) { ok = 0; }
+        ref_dist(x); if (same_bits(S_refprobs, cpu + 800 + x * 80, 10) == 0) { ok = 0; }
+        var a = 0;
+        while (a < 10) {
+            if (rm_reward(x, a) != load64(cpu + 1600 + (x * 10 + a) * 8)) { ok = 0; }
+            a = a + 1;
+        }
+        x = x + 1;
+    }
+    memo_end();
+    g_gpu = 0;
+    assert_eq(ok, 1, "--gpu: pi, pi_ref and r_theta in a memo region are the CPU's bits");
+    assert_eq((g_dev_fills - f0) + (g_dev_declined - d0), 3, "--gpu: one table per model and version");
+    # declined tables (V·V past the dispatch cap) fall back to the CPU row by row, and each
+    # model's is tried once per version
+    pol_init(256, 8, 4, 0, 42); dpo_init(); dpo_snapshot(); rm_init(); g_datalen = 0;
+    var got = t_alloc(256); var want = t_alloc(256);
+    d0 = g_dev_declined; ok = 1;
+    g_gpu = 1;
+    memo_begin();
+    x = 0;
+    while (x < 256) {
+        pol_dist(x); t_copy(got, S_probs, 256);
+        direct_dist(x, want);
+        if (same_bits(got, want, 256) == 0) { ok = 0; }
+        ref_dist(x); t_copy(got, S_refprobs, 256);
+        ref_logits(x); ref_softmax();
+        if (same_bits(got, S_refprobs, 256) == 0) { ok = 0; }
+        var r = rm_reward(x, 7); rm_logits(x);
+        if (r != load64(S_rlogits + 7 * 8)) { ok = 0; }
+        x = x + 1;
+    }
+    memo_end();
+    g_gpu = 0;
+    assert_eq(ok, 1, "--gpu: a declined table's rows are the CPU's");
+    assert_eq(g_dev_declined - d0, 3, "--gpu: a declined table is tried once per model and version");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_memo_hit_equals_compute();
@@ -356,6 +467,8 @@ fn main(): i64 {
     test_mc_oracle();
     test_mc_sort();
     test_mc_tree_books();
+    test_dev_table();
+    test_dev_memo();
     return assert_summary();
 }
 

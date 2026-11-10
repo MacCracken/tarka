@@ -99,14 +99,31 @@ jobs:
       - name: Demo gates
         # The demo is the integration test: every method trains and its gate must
         # hold. Exit 0 = ALL GATES PASS.
-        run: ./build/tarka
+        run: |
+          set -o pipefail
+          ./build/tarka | tee build/demo.out
+
+      - name: Demo under --gpu
+        # A runner has no GPU, so every logits table is declined and computed on the
+        # CPU (rosnet's fallback contract): the gates must pass and every line but the
+        # "GPU: " ones must match the CPU run byte for byte. On a host with a device the
+        # same comparison is the bit-exact parity check (docs/adr/0004-gpu-parity-backend.md).
+        run: |
+          set -o pipefail
+          ./build/tarka --gpu > build/demo_gpu.out
+          grep '^GPU: ' build/demo_gpu.out
+          grep -v '^GPU: ' build/demo_gpu.out | cmp - build/demo.out \
+            || { echo "FAIL: --gpu changed the demo's output"; exit 1; }
 
       - name: --pref gates
         # The untrusted-input path end to end on a fixture with good, bad and
         # malformed rows. Exit 0 = DPO / IPO / KTO gates green. Then a file one
         # byte over the 1 MB cap must be refused (exit 1), not truncated.
         run: |
-          ./build/tarka --pref tests/fixtures/prefs.jsonl
+          set -o pipefail
+          ./build/tarka --pref tests/fixtures/prefs.jsonl | tee build/pref.out
+          ./build/tarka --gpu --pref tests/fixtures/prefs.jsonl | grep -v '^GPU: ' | cmp - build/pref.out \
+            || { echo "FAIL: --gpu changed the --pref output"; exit 1; }
           head -c 1048577 /dev/zero | tr '\0' ' ' > build/over_cap.jsonl
           set +e; ./build/tarka --pref build/over_cap.jsonl > build/over_cap.out 2>&1; rc=$?; set -e
           cat build/over_cap.out
@@ -199,8 +216,11 @@ jobs:
 
       - name: Cross-build + run the demo and --pref on aarch64
         run: |
+          set -o pipefail
           cyrius build --aarch64 src/main.cyr build/tarka_a64
-          "$QEMU" build/tarka_a64
+          "$QEMU" build/tarka_a64 | tee build/demo_a64.out
+          "$QEMU" build/tarka_a64 --gpu | grep -v '^GPU: ' | cmp - build/demo_a64.out \
+            || { echo "FAIL: --gpu changed the aarch64 demo's output"; exit 1; }
           "$QEMU" build/tarka_a64 --pref tests/fixtures/prefs.jsonl
 
   security:
@@ -212,8 +232,8 @@ jobs:
           persist-credentials: false
       - name: Scan for dangerous patterns
         # Informational. tarka runs no processes and opens one file (the --pref
-        # path, read-only, capped); kept for parity with the sibling repos and to
-        # catch a regression.
+        # path, read-only, capped) — plus, only under --gpu, the DRM render node through
+        # mabda; kept for parity with the sibling repos and to catch a regression.
         run: |
           if grep -rn 'syscall(59' src/ 2>/dev/null | grep -v "# "; then
             echo "WARN: raw execve"

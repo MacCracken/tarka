@@ -4,6 +4,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-09
+
+The 1.5.x roadmap line: `--gpu` through rosnet's GPU bundle, shipped as a **bit-exact parity
+backend, not a speedup** ([ADR 0004](docs/adr/0004-gpu-parity-backend.md)). On the reference
+iGPU, rosnet's device path is slower than tarka's CPU at every shape measured, so the gate is
+parity, and the cost is reported as measured. No public signature changed, and no CPU result moved.
+
+### Added
+
+- **`tarka --gpu`** (a leading flag, before the demo or `--pref`).
+  - **What runs on the device.** A memo miss under rosnet's `g_gpu` fills the model's whole logits
+    table, `Y(V×V) = E·W + b`, every state at once, with one `gpu_matmul_fwd` (rosnet's bit-exact
+    class). It runs once per parameter version for each of the policy, the frozen reference and
+    the reward model (`dev_table` in `src/rl.cyr`). D is zero-padded to rosnet's k-tile (16); a
+    padded term adds +0 to a sum that is never −0.
+  - **Declines.** A table the device declines (no device, a shape it does not take, a failed
+    dispatch) is computed row by row on the CPU, as without `--gpu`, and is tried once per version.
+  - **What stays on the CPU.** Per-token forwards outside a memo region, the critic, every
+    backward and Adam. `gpu_adam_step` rounds differently from tarka's Adam (1 − β as 1/10, the
+    bias correction by `pow`), and `gpu_linear_bwd` is rosnet's tolerance class.
+  - **What it prints.** Its own lines start with `GPU: `: rosnet's device probe, then how many
+    tables were filled and how many declined. Every other line is the CPU run's.
+- **Parity tests.**
+  - `tests/golden.tcyr` runs all 15 cases a second time under `--gpu` against the same digests,
+    requiring the device to be used when one is present and every table declined when none is
+    (31 assertions on either kind of host).
+  - `tests/units.tcyr` (+17) checks:
+    - the device table against `linear_fwd`, row by row, at D 8, 16 and 17;
+    - that a present device takes every padded shape;
+    - a decline past mabda's dispatch cap, on every host;
+    - that nothing runs with `--gpu` off;
+    - that π, π_ref and r_θ in a memo region are the CPU's bits, filled or declined, and that a
+      declined table is tried once per model and version.
+- **CI** compares the `--gpu` demo and `--pref` output with the CPU's, byte for byte (minus the
+  `GPU: ` lines), on x86_64 and under qemu-aarch64. A runner has no device, so this checks the
+  fallback; on a host with a device, it is the parity check. Blocks that pipe now set `pipefail`.
+- **Benchmarks:** a logits table at V28 D8 and V92 D16, on the CPU and as one dispatch, and a
+  REINFORCE step under `--gpu`. The device rows run only with a device. A mutation run of 11
+  mutants of the device path killed all 11.
+- **ADR 0004**, and benchmarks § 10, with the measurements behind the decision:
+  - per call, CPU against device: the corridor's table 3.5 µs → 69 µs, the demo's 13 µs → 98 µs;
+  - a 255 × 64 × 256 matmul 2.03 ms → 16.6 ms;
+  - Adam on the demo's policy 12.6 µs → 108 µs.
+
+### Changed
+
+- **akshara 1.1.2 → 1.3.1** (cyrius 6.7.18, rosnet 1.4.1; a faster BPE encoder and learn, and a
+  `stream_tok` hardening that tarka's pure path never reaches). No signature changed, and every
+  output is bit-identical: all golden digests and the demo are unchanged. `cyrius.lock` was
+  regenerated; its diff is akshara's hash and commit pin.
+- **Every build carries rosnet's GPU bundle and mabda** (the cyrius 6.7.18 snapshot's bundled
+  stdlib leaf, 4.2.0, as in attn11), with `result` and `ganita` beside it. The binary grows
+  1.30 → 2.14 MB. With `--gpu` off nothing in them runs, and the CPU path gains one branch per
+  memo miss.
+- **The demo under `--gpu`** fills 6,321 tables on the reference iGPU (0 declined) and takes 31%
+  longer than without it (alternating runs on a loaded host: 2.81 → 3.67 s).
+- `SECURITY.md`: `--gpu` opens the DRM render node through mabda. It sends only tarka's own
+  parameters, and a device cannot change a result.
+
+### Not stamped
+
+- `bench-history.csv` has no 1.5.0 rows. The session's host was loaded by other jobs (load average
+  ≈ 12), which doubled every row, so the rows were removed rather than recorded; run
+  `./scripts/bench-history.sh` on a quiet host.
+
 ## [1.4.0] - 2026-11-09
 
 The 1.4.x roadmap line: Monte Carlo tree search on a task that warrants it, gated honestly

@@ -24,3 +24,4 @@ Decisions about tarka — what we chose, the context, and the consequences we ac
 | [0001](0001-tarka-scope-and-rl-migration.md) | tarka scope and the attn11 RL-migration boundary | Accepted |
 | [0002](0002-optimizations-preserve-bits.md) | Refactors and optimizations preserve every bit | Accepted |
 | [0003](0003-prior-guided-mcts.md) | Prior-guided MCTS, gated against beams with the same networks | Accepted |
+| [0004](0004-gpu-parity-backend.md) | `--gpu` as a bit-exact parity backend, not a speedup | Accepted |

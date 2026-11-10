@@ -191,6 +191,45 @@ fn bench_pref_parse(): i64 {
     return 0;
 }
 
+# --gpu (1.5.0): one logits table (every state's logits) row by row on the CPU, and as one
+# device dispatch. Without a device the device rows are skipped (a decline costs nothing).
+fn bench_table(V, D, iters, cpu_name, gpu_name, have): i64 {
+    pol_init(V, D, 24, 3, 7); g_datalen = 0;
+    var Y = t_alloc(V * V);
+    var b = bench_new(cpu_name);
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) { var x = 0; while (x < V) { pol_logits(x); x = x + 1; } i = i + 1; }
+    bench_batch_stop(b, iters);
+    bench_report(b);
+    if (have == 0) { return 0; }
+    g_gpu = 1;
+    var b2 = bench_new(gpu_name);
+    bench_batch_start(b2);
+    i = 0;
+    while (i < iters) { dev_table(P_E, P_W, P_b, Y); i = i + 1; }
+    bench_batch_stop(b2, iters);
+    bench_report(b2);
+    g_gpu = 0;
+    return 0;
+}
+
+fn bench_gpu(): i64 {
+    var have = 0; if (gpu_probe() == 0) { have = 1; }
+    bench_table(28, 8, 2000, "logits table V28 D8 (CPU, 28 rows)", "logits table V28 D8 (gpu, one dispatch)", have);
+    bench_table(92, 16, 300, "logits table V92 D16 (CPU, 92 rows)", "logits table V92 D16 (gpu, one dispatch)", have);
+    if (have == 0) { puts("  (no device: the --gpu rows are skipped)\n"); return 0; }
+    pol_init(28, 8, 24, 3, 5); g_datalen = 0;
+    g_gpu = 1;
+    var b = bench_new("REINFORCE step under gpu (batch 16, T 24, V28 D8)");
+    bench_batch_start(b);
+    rl_train(20, 16, LR(), 0);
+    bench_batch_stop(b, 20);
+    bench_report(b);
+    g_gpu = 0;
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     bench_forward("forward V28 D8", 28, 8, 200000);
@@ -208,6 +247,7 @@ fn main(): i64 {
     bench_kto_step();
     bench_beam();
     bench_mcts();
+    bench_gpu();
     bench_pref_parse();
     return 0;
 }

@@ -13,7 +13,9 @@ test = "src/test.cyr"
 output = "build/tarka"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math", "args", "bayan"]
+# "mabda" (the GPU foundation: device, buffers, dispatch — Linux DRM) and the two leaves
+# rosnet's GPU bundle names beside it ("result", "ganita") serve `--gpu` (1.5.0).
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math", "args", "bayan", "mabda", "result", "ganita"]
 
 # tarka is a SIBLING consumer of the same f64 tensor substrate attn11 uses, not a
 # chain on top of attn11-the-binary. The policy/value networks reassemble from
@@ -30,12 +32,15 @@ modules = ["dist/tyche.cyr"]
 
 # Dense f64 tensor algebra (the BLAS substrate): storage, BLAS-1, matmul + gradient.
 # tarka's policy/value heads build from these primitives, the same way attn11's
-# transformer does. CPU bundle only (no GPU profile until a GPU milestone).
+# transformer does. Both bundles (1.5.0): the CPU core, and the GPU profile
+# (dist/rosnet-gpu.cyr, rosnet ADR 0001) behind `tarka --gpu`. The GPU bundle leaves
+# mabda's device symbols unresolved; the bundled stdlib leaf "mabda" above supplies them
+# (as in attn11). With --gpu off nothing in it runs: the CPU path is unchanged.
 # NOTE: rosnet's t_randn calls tyche's rng_normal — the [deps.tyche] above resolves it.
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet"
 tag = "1.4.1"
-modules = ["dist/rosnet.cyr"]
+modules = ["dist/rosnet.cyr", "dist/rosnet-gpu.cyr"]
 
 # Sovereign tokenizer (byte vocab + BPE + packed token store) — the text→token-id
 # layer, the third attn11 extraction (with rosnet/tyche). tarka draws rollout
@@ -46,5 +51,5 @@ modules = ["dist/rosnet.cyr"]
 # come from [deps.rosnet] above. One tokenizer, shared with attn11.
 [deps.akshara]
 git = "https://github.com/MacCracken/akshara"
-tag = "1.1.2"
+tag = "1.3.1"
 modules = ["dist/akshara.cyr"]

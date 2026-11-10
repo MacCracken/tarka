@@ -1,7 +1,7 @@
 # tarka — Roadmap
 
 > What ships next, by release line. Shipped work is in [`CHANGELOG.md`](../../CHANGELOG.md)
-> (0.1.0 → 1.4.0); live state is in [`state.md`](state.md).
+> (0.1.0 → 1.5.0); live state is in [`state.md`](state.md).
 >
 > **The 1.x rule.** A 1.x release may add symbols to the frozen API ([`docs/api.md`](../api.md))
 > and may move results as a *labeled behavior change* — it re-records the golden cases it
@@ -9,25 +9,26 @@
 > It may not change or remove a frozen signature. Anything that would is in the
 > [2.0.0 backlog](#200-backlog--breaks-the-frozen-1x-api).
 
-## 1.5.x — GPU backend
-
-- **`--gpu` through rosnet's GPU bundle** (rosnet-gpu + mabda). The CPU path stays the reference
-  oracle: its golden digests do not move, and GPU results are checked against it within rosnet's
-  bit-exact / tolerance classes. The prerequisites are met: the GPU bundle compiles at cyrius
-  ≥ 6.6.19 (the pin is 6.7.18), and since rosnet 1.2.2 it no longer needs the consumer to define
-  `puts`.
-
-## 1.x.x — unscheduled
-
-Recorded so they are not lost; each waits for a caller that needs it.
+## 1.6.x — MCTS where the tree matters
 
 - **MCTS on a stochastic or adversarial task.** 1.4.0 shipped prior-guided PUCT on a
   deterministic task, where a beam given the same prior and value matches it at less compute
   ([ADR 0003](../adr/0003-prior-guided-mcts.md)). MCTS's own advantage — averaging over chance
   outcomes, or an opponent's replies, where a beam keeps lucky branches — needs a task with
   stochastic transitions or two players. Expert iteration (training π on MCTS's visit counts)
-  belongs with it.
+  belongs with it. Gated as 1.4.0 was: against the strongest beam the same networks allow.
 
+## 1.x.x — unscheduled
+
+Recorded so they are not lost; each waits for a caller that needs it.
+
+- **A GPU path that pays.** 1.5.0's `--gpu` is bit-exact and slower than the CPU at every shape
+  tarka has on the reference iGPU ([ADR 0004](../adr/0004-gpu-parity-backend.md)). It waits for a
+  device or a batched kernel on which a dispatch beats the CPU. Then a tolerance class
+  (`--gpu-tc`: the aggregated backward through `gpu_linear_bwd`, Adam through `gpu_adam_step`)
+  would trade byte identity for speed, gated within rosnet's ~1e-13 class. Making tarka's Adam
+  bit-exact with rosnet's (1 − β as 1/10, the bias correction by `pow`) is a labeled behavior
+  change that moves every golden case.
 - **An aggregated backward for the reward model.** 1.3.0 aggregates the policy's backward per
   state ([architecture note 002](../architecture/002-aggregated-backward.md)); the reward model's
   (`rm_accum_seed`) still runs one `linear_bwd` per step, with a one-hot seed. The same rewrite

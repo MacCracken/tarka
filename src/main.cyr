@@ -3,11 +3,13 @@
 # benchmark, learned PRM/ORM rewards, self-consistency and verifier best-of-N, PRM-guided
 # beam search, DPO + the KL penalty, IPO + KTO). Exit 0 = ALL GATES PASS. With
 # `--pref <file>` it trains DPO / IPO / KTO from an ifran preference export instead
-# (src/pref_ingest.cyr).
+# (src/pref_ingest.cyr). A leading `--gpu` (1.5.0) fills the memo regions' logits tables
+# on the device through rosnet's GPU bundle — bit-exact, so every result is the CPU's
+# (docs/adr/0004-gpu-parity-backend.md); its own lines start with "GPU: ".
 #
-#   tarka                     run the demo
-#   tarka --pref <file>       train from a preference export
-#   tarka --help              usage
+#   tarka [--gpu]                     run the demo
+#   tarka [--gpu] --pref <file> ...   train from a preference export
+#   tarka --help                      usage
 
 include "lib/tyche.cyr"    # rng_seed / rng_uniform / rng_u64 / rng_normal
 include "lib/rosnet.cyr"   # linear_fwd / linear_bwd / t_*  (t_randn -> tyche)
@@ -47,9 +49,11 @@ fn mc_row(label, v, f): i64 {
 
 # print the command-line usage
 fn usage(): i64 {
-    puts("usage: tarka                            run the demo (exit 0 = all gates pass)\n");
-    puts("       tarka --pref <file> [options]    train DPO / IPO / KTO from an ifran `pref export` JSONL file\n");
-    puts("       tarka --help                     this message\n");
+    puts("usage: tarka [--gpu]                            run the demo (exit 0 = all gates pass)\n");
+    puts("       tarka [--gpu] --pref <file> [options]    train DPO / IPO / KTO from an ifran `pref export`\n");
+    puts("                                                JSONL file\n");
+    puts("       tarka --help                             this message\n");
+    puts("  --gpu          fill the memo's logits tables on the GPU (rosnet's bit-exact class; same results)\n");
     puts("--pref options:\n");
     puts("  --epochs N     epochs per optimizer, 1..100000 (default 300)\n");
     puts("  --lr X         learning rate, a decimal in (0, 10] (default 0.05)\n");
@@ -65,12 +69,14 @@ fn pref_usage_error(msg, arg): i64 {
     return 2;
 }
 
-# `tarka --pref <file> [options]`: parse the options and run the ingestion driver
-fn pref_main(): i64 {
-    if (argc() < 3) { return pref_usage_error("--pref needs a <prefs.jsonl> (an ifran `pref export` file)", 0); }
-    if (load8(argv(2)) == 45) { return pref_usage_error("--pref needs the file first, not an option: ", argv(2)); }
+# `tarka --pref <file> [options]`, with --pref at argv(b): parse the options and run the
+# ingestion driver
+fn pref_main(b): i64 {
+    if (argc() < b + 2) { return pref_usage_error("--pref needs a <prefs.jsonl> (an ifran `pref export` file)", 0); }
+    var file = argv(b + 1);
+    if (load8(file) == 45) { return pref_usage_error("--pref needs the file first, not an option: ", file); }
     var epochs = PI_EPOCHS(); var lr = PI_LR(); var dim = PI_DIM(); var early = 0;
-    var i = 3;
+    var i = b + 2;
     while (i < argc()) {
         var a = argv(i);
         var valued = 0;
@@ -93,7 +99,28 @@ fn pref_main(): i64 {
             i = i + 2;
         } else { return pref_usage_error("unknown --pref option: ", a); }
     }
-    return tarka_pref_ingest_opts(argv(2), epochs, lr, dim, early);
+    return tarka_pref_ingest_opts(file, epochs, lr, dim, early);
+}
+
+# --gpu: report the device (rosnet's gpu_probe prints its "GPU: " lines)
+fn gpu_start(): i64 {
+    g_gpu = 1;
+    if (gpu_probe() != 0) { puts("GPU: no device: every table is computed on the CPU\n"); }
+    return 0;
+}
+
+# --gpu: how many logits tables the device filled, and how many it declined
+fn gpu_report(): i64 {
+    if (g_gpu == 0) { return 0; }
+    if (g_dev_fills == 0) {
+        puts("GPU: no table ran on the device ("); fmt_int(g_dev_declined);
+        puts(" declined, computed on the CPU)\n");
+        return 0;
+    }
+    puts("GPU: "); fmt_int(g_dev_fills); puts(" logits tables filled on the device ("); fmt_int(gpu_mm_count());
+    puts(" dispatches), "); fmt_int(g_dev_declined); puts(" declined (computed on the CPU); bit-exact class: ");
+    puts("every result above is the CPU's\n");
+    return 0;
 }
 
 # run the demo, or the --pref driver; returns the exit code
@@ -102,13 +129,21 @@ fn main(): i64 {
     # --pref <prefs.jsonl>: train DPO/IPO/KTO from an ifran-curated preference
     # export instead of running the demo suite (ifran Lane 3; src/pref_ingest.cyr)
     args_init();
-    if (argc() >= 2) {
-        if ((streq(argv(1), "--help") == 1) || (streq(argv(1), "-h") == 1)) { usage(); return 0; }
-        if (streq(argv(1), "--pref") == 1) { return pref_main(); }
-        puts("tarka: unknown argument: "); puts(argv(1)); puts("\n");
+    var b = 1; var gpu = 0;
+    if ((argc() >= 2) && (streq(argv(1), "--gpu") == 1)) { gpu = 1; b = 2; }
+    if (argc() > b) {
+        if ((streq(argv(b), "--help") == 1) || (streq(argv(b), "-h") == 1)) { usage(); return 0; }
+        if (streq(argv(b), "--pref") == 1) {
+            if (gpu == 1) { gpu_start(); }
+            var rc = pref_main(b);
+            gpu_report();
+            return rc;
+        }
+        puts("tarka: unknown argument: "); puts(argv(b)); puts("\n");
         usage();
         return 2;
     }
+    if (gpu == 1) { gpu_start(); }
     # real tokenized corpus via akshara (byte-level vocab over a short text)
     var corpus = "the quick brown fox jumps over the lazy dog. ";
     var clen = 0; while (load8(corpus + clen) != 0) { clen = clen + 1; }
@@ -360,6 +395,7 @@ fn main(): i64 {
         puts("KTO raises desirable ρ + lowers undesirable ρ\n");
     } else { puts("  preference-ext GATE FAIL\n"); }
 
+    gpu_report();
     if ((ac_ok == 1) && (reward_ok == 1) && (reason_ok == 1) && (search_ok == 1) && (mcts_ok == 1) && (align_ok == 1)
         && (ext_ok == 1)) {
         puts("\n  ALL GATES PASS\n"); return 0;

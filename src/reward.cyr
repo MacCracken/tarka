@@ -35,6 +35,7 @@ var RC_stamp = 0;   # V    the RC_epoch row s was filled at (0 = never)
 var RC_epoch = 0;
 var RC_seen = 0;
 var RM_V = 0; var RM_D = 0;   # the dims rm_init sized the RM for
+var RC_try = 0;     # the RC_epoch a device fill (--gpu) was last tried at
 
 # allocate and initialize the reward model (own embedding + head) and its cache for the
 # current dims (call after pol_init)
@@ -78,6 +79,17 @@ fn rm_logits(x): i64 {
     linear_fwd(P_Er + x * g_D * 8, P_Wr, P_br, S_rlogits, 1, g_D, g_V);
     return 0;
 }
+# --gpu: fill every row of RC_logits at once on the device (rl.cyr dev_table) and stamp
+# them all; 0 = filled, non-0 = not tried or declined (the caller computes the row)
+fn rm_dev_fill(): i64 {
+    if ((g_gpu == 0) || (RC_try == RC_epoch)) { return 1; }
+    RC_try = RC_epoch;
+    if (dev_table(P_Er, P_Wr, P_br, RC_logits) != 0) { return 1; }
+    var s = 0;
+    while (s < g_V) { store64(RC_stamp + s * 8, RC_epoch); s = s + 1; }
+    return 0;
+}
+
 # r_θ(x, a). Inside a memo region the row z_x is computed once per RM version.
 fn rm_reward(x, a): i64 {
     guard((RM_V == g_V) && (RM_D == g_D), "rm_reward: call rm_init() after pol_init()");
@@ -85,7 +97,7 @@ fn rm_reward(x, a): i64 {
     if (g_memo_depth == 0) { rm_logits(x); return load64(S_rlogits + a * 8); }
     if (RC_seen != g_memo_gen) { RC_epoch = RC_epoch + 1; RC_seen = g_memo_gen; }
     var row = RC_logits + x * g_V * 8;
-    if (load64(RC_stamp + x * 8) != RC_epoch) {
+    if ((load64(RC_stamp + x * 8) != RC_epoch) && (rm_dev_fill() != 0)) {
         rm_logits(x);
         t_copy(row, S_rlogits, g_V);
         store64(RC_stamp + x * 8, RC_epoch);

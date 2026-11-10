@@ -10,7 +10,8 @@
 # (the vocab covers decoded field bytes; skip reasons are counted). 1.3.0 re-recorded "pref
 # ingest" (two-length pairs), then every case but "search" (the per-state aggregated backward
 # reorders the policy gradient's sums; search trains only the reward model). 1.4.0 added "mcts"
-# and moved no other case. Parameter digests and
+# and moved no other case. 1.5.0 runs every case a second time under rosnet's g_gpu (--gpu),
+# against the same digests (docs/adr/0004-gpu-parity-backend.md). Parameter digests and
 # metric digests are kept apart so a metric-only fix (e.g. a corrected average) cannot hide
 # a training change.
 
@@ -234,23 +235,47 @@ fn check(name, got, want_x86, want_a64): i64 {
     return 0;
 }
 
+# the case's name, or "gpu: <name>" for the --gpu pass
+fn gname(n, gpu): i64 {
+    if (gpu == 0) { return n; }
+    var o = alloc(strlen(n) + 6);
+    memcpy(o, "gpu: ", 5); memcpy(o + 5, n, strlen(n) + 1);
+    return o;
+}
+
+# every case, with rosnet's g_gpu as given: the --gpu pass (1.5.0) must give the CPU's
+# digests, because the device fills the memo's logits tables in rosnet's bit-exact class
+fn run_all(gpu): i64 {
+    g_gpu = gpu;
+    check(gname("reinforce", gpu), case_reinforce(), 0x17c1a6f059ac2011, 0xdf24bf2b1fd8f24f);
+    check(gname("ppo", gpu), case_ppo(), 0x94911847ccc64a05, 0x9473589bfb360ea5);
+    check(gname("grpo", gpu), case_grpo(), 0xdbf91e425285622b, 0xaf9b9e8bfb96edc4);
+    check(gname("parity", gpu), case_parity(), 0x3ec19d279b46e344, 0x90d3095342f3b334);
+    check(gname("eff_run", gpu), case_effrun(), 0xd9fcb32675d8bfeb, 0x2bcb4b9d76754522);
+    check(gname("reward", gpu), case_reward(), 0x954cc5d2aab2c6d2, 0xdff18f9afaa94406);
+    check(gname("reasoning", gpu), case_reasoning(), 0xdd1d7657fab8b4ad, 0xedfae6e776c5e000);
+    check(gname("search", gpu), case_search(), 0x9b62159799ce5363, 0x9e96dfe034345e45);
+    check(gname("dpo+kl", gpu), case_dpo(), 0xecbc3983071f5a08, 0x7a93987110499735);
+    check(gname("ipo train", gpu), case_ipo_train(), 0x1321878753f971f3, 0xf6bc95596019afee);
+    check(gname("ipo metric", gpu), case_ipo_metric(), 0x7608c2fa05f72eed, 0x7608adfa05f70b3e);
+    check(gname("kto", gpu), case_kto(), 0x7842b1b30885e058, 0x5cde51b5d0e48db1);
+    check(gname("corpus reinforce", gpu), case_corpus(), 0xe3e9df5346490389, 0x49dabcd2a1a09b2b);
+    check(gname("mcts", gpu), case_mcts(), 0x55524cb2abddbc6d, 0x94eb754bdb1111e3);
+    check(gname("pref ingest", gpu), case_pref(), 0xfea56cab63ff976b, 0xbce9385d4c0eadcc);
+    g_gpu = 0;
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
-    check("reinforce", case_reinforce(), 0x17c1a6f059ac2011, 0xdf24bf2b1fd8f24f);
-    check("ppo", case_ppo(), 0x94911847ccc64a05, 0x9473589bfb360ea5);
-    check("grpo", case_grpo(), 0xdbf91e425285622b, 0xaf9b9e8bfb96edc4);
-    check("parity", case_parity(), 0x3ec19d279b46e344, 0x90d3095342f3b334);
-    check("eff_run", case_effrun(), 0xd9fcb32675d8bfeb, 0x2bcb4b9d76754522);
-    check("reward", case_reward(), 0x954cc5d2aab2c6d2, 0xdff18f9afaa94406);
-    check("reasoning", case_reasoning(), 0xdd1d7657fab8b4ad, 0xedfae6e776c5e000);
-    check("search", case_search(), 0x9b62159799ce5363, 0x9e96dfe034345e45);
-    check("dpo+kl", case_dpo(), 0xecbc3983071f5a08, 0x7a93987110499735);
-    check("ipo train", case_ipo_train(), 0x1321878753f971f3, 0xf6bc95596019afee);
-    check("ipo metric", case_ipo_metric(), 0x7608c2fa05f72eed, 0x7608adfa05f70b3e);
-    check("kto", case_kto(), 0x7842b1b30885e058, 0x5cde51b5d0e48db1);
-    check("corpus reinforce", case_corpus(), 0xe3e9df5346490389, 0x49dabcd2a1a09b2b);
-    check("mcts", case_mcts(), 0x55524cb2abddbc6d, 0x94eb754bdb1111e3);
-    check("pref ingest", case_pref(), 0xfea56cab63ff976b, 0xbce9385d4c0eadcc);
+    run_all(0);
+    run_all(1);
+    # with a device the --gpu pass must have used it; without one (CI, qemu) every table
+    # was declined and computed on the CPU, which the digests above already checked
+    puts("  --gpu pass: "); fmt_int(g_dev_fills); puts(" tables filled on the device, ");
+    fmt_int(g_dev_declined); puts(" declined\n");
+    if (gpu_probe() == 0) { assert(g_dev_fills > 0, "a device is present: the --gpu pass used it"); }
+    else { assert_eq(g_dev_fills, 0, "no device: every table was declined"); }
     return assert_summary();
 }
 

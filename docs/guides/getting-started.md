@@ -13,8 +13,8 @@ cyrius test                              # run [build].test + tests/*.tcyr
 - `src/main.cyr` — entry point + the demo (runs every milestone, prints the acceptance gates) and the CLI.
 - `src/test.cyr` — top-level test entry referenced by `cyrius.cyml [build].test` (a stub).
 - `tests/tarka.tcyr` — the finite-difference grad-check suite (59).
-- `tests/pref_ingest.tcyr` — `--pref` ingestion (117); `tests/units.tcyr` — the memo's and the aggregated backward's rules, the task helpers, the corridor and the tree's books (75).
-- `tests/golden.tcyr` — the bit-for-bit gate: 15 digests per target ([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
+- `tests/pref_ingest.tcyr` — `--pref` ingestion (117); `tests/units.tcyr` — the memo's and the aggregated backward's rules, the task helpers, the corridor and the tree's books, the device path (92).
+- `tests/golden.tcyr` — the bit-for-bit gate: 15 digests per target, each checked on the CPU and again under `--gpu` ([ADR 0002](../adr/0002-optimizations-preserve-bits.md), [ADR 0004](../adr/0004-gpu-parity-backend.md)).
 - `tests/abort/*.cyr` — guard probes (each must exit 1); `tests/fixtures/` — the `--pref` fixture.
 - `tests/tarka.bcyr` / `tests/tarka.fcyr` — benchmarks / the seeded `--pref` fuzz harness.
 
@@ -22,7 +22,7 @@ cyrius test                              # run [build].test + tests/*.tcyr
 
 | file | contents |
 |------|----------|
-| `src/rl.cyr` | the minimal rosnet-backed policy + on-policy REINFORCE + Adam + the fail-loud `guard()` |
+| `src/rl.cyr` | the minimal rosnet-backed policy + on-policy REINFORCE + Adam + the fail-loud `guard()` + the memo and its `--gpu` table fill (`dev_table`) |
 | `src/actorcritic.cyr` | value critic, GAE, PPO (clipped surrogate), GRPO (group-relative) |
 | `src/reward.cyr` | Bradley-Terry learned reward model `r_θ(s,a)` (own embedding, log-sigmoid) |
 | `src/parity.cyr` | the parity control task + per-method RL steps + the sample-efficiency benchmark |

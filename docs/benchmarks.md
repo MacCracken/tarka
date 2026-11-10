@@ -157,6 +157,11 @@ Ryzen 7 5800H, x86_64) on 2026-11-09 — 1.2.1 and 1.2.2 in one session, 1.3.0 a
 | beam prior + value B4 K4 (per prompt, corridor) | — | — | — | 101.1 µs | (1.4.0; § 9) |
 | pref_ingest_file, ~1 MB JSONL | 22.06 ms | 25.83 ms | 27.03 ms | 25.76 ms | the validating second pass (1.2.2) |
 
+1.5.0 is not stamped in `bench-history.csv`. The session's host was busy with other jobs (load
+average ≈ 12 on 16 threads), which doubled every row, including kernels 1.5.0 does not touch; run
+`./scripts/bench-history.sh` on a quiet host. 1.5.0 changes no CPU kernel: with `--gpu` off, the
+CPU path gains one branch per memo miss.
+
 1.2.2's gain is the distribution memo, 1.3.0's the aggregated backward. End to end: the demo
 3,495 → 986 → **706 ms** (median of three; 4.9× since 1.2.1); the review's 103 KB, V 92
 preference file 219 → 41 → **14.4 s**; the demo under qemu-aarch64 36 → 10 → **6 s**. 1.4.0
@@ -191,6 +196,43 @@ beam lacks. In wall time the beam is cheaper still: 0.10 ms per prompt against M
 The ADR records the three formulations measured before this one (a learned verifier blurred the
 corridor or was over-optimized; plain UCT could not expand it; on-policy PPO gave a prior
 captured by the TRAP).
+
+## 10. `--gpu` — bit-exact, and slower on the reference iGPU
+
+[ADR 0004](adr/0004-gpu-parity-backend.md). The device fills each memo region's logits table
+(every state's logits, `Y = E·W + b`) in one `gpu_matmul_fwd`, rosnet's bit-exact class. The host
+is an AMD Ryzen 7 5800H's integrated Radeon (GFX9), with mabda 4.2.0 and rosnet 1.4.1. Measured
+before the design, on a quiet host, per call:
+
+| op (M × K × N) | CPU | device |
+|----------------|----:|-------:|
+| all logits, 12 × 16 × 12 (the corridor) | 3.5 µs | 69 µs |
+| all logits, 28 × 16 × 28 (the demo, D 8 padded) | 13 µs | 98 µs |
+| all logits, 92 × 16 × 92 (the review's `--pref` file) | 92 µs | 459 µs |
+| matmul 255 × 64 × 256 | 2.03 ms | 16.6 ms |
+| matmul 256 × 64 × 256 | 1.86 ms | declined (past mabda's dispatch cap) |
+| Adam, 476 / 33,024 parameters | 12.6 µs / 0.57 ms | 108 µs / 2.81 ms (not bit-exact for tarka: not used) |
+
+Every matmul came back bit-identical to `linear_fwd`. The 1.5.0 bench rows, from one run on the
+loaded host (so the ratios are fair, though the absolute times are inflated):
+
+| benchmark | CPU | `--gpu` |
+|-----------|----:|--------:|
+| logits table V28 D8 (28 rows / one dispatch) | 16.0 µs | 131.5 µs |
+| logits table V92 D16 (92 rows / one dispatch) | 208.1 µs | 618.0 µs |
+| REINFORCE step (batch 16, T 24, V28 D8) | 330.8 µs | 563.4 µs |
+
+**Gate: parity** ✅.
+- The demo under `--gpu` fills **6,321** tables on the device and declines **0**. Every line but
+  the `GPU: ` ones is the CPU run's.
+- The `--pref` fixture's run fills **915** tables, and is likewise the CPU's output.
+- `tests/golden.tcyr` re-runs all 15 cases under `--gpu` against the CPU's digests (1,202 tables on
+  the device).
+- Speed is not gated, and is reported as measured. On the loaded host, run alternately, the CPU
+  took 2.81 s and `--gpu` 3.67 s (medians of three): 31% longer, which the 6,321 dispatches account
+  for.
+- Without a device (a CI runner, or aarch64 under qemu), every table is declined and computed on the
+  CPU.
 
 ## Performance notes
 

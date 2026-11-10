@@ -33,6 +33,10 @@ the *methods* are the point):
   **verifier best-of-N**, **PRM-guided beam search** that steers generation to a
   verifier objective greedy and best-of-N cannot reach, and **prior-guided MCTS** (PUCT with a
   learned prior and value), gated honestly against a beam given the same networks.
+- **A GPU path** — `tarka --gpu` fills the memo's logits tables on the device through rosnet's
+  GPU bundle, in its bit-exact class: same output, held by the golden gate. On the reference
+  iGPU it is slower than the CPU at every shape tarka has, and says so
+  ([ADR 0004](docs/adr/0004-gpu-parity-backend.md)).
 
 Every hand-derived backward is finite-difference grad-checked (**59**), each method is
 held to a falsifiable **acceptance gate** — see [`docs/benchmarks.md`](docs/benchmarks.md) —
@@ -74,9 +78,10 @@ transformer does — so tarka does **not** depend on attn11-the-binary. See
 ## Build
 
 ```sh
-cyrius deps                              # resolve stdlib + rosnet/tyche/akshara
+cyrius deps                              # resolve stdlib (+ mabda) + rosnet/tyche/akshara
 cyrius build src/main.cyr build/tarka    # compile to a static ELF
 ./build/tarka                            # run the demo — every acceptance gate
+./build/tarka --gpu                      # the same run, the memo's tables on the GPU (bit-exact)
 ./build/tarka --pref prefs.jsonl         # train DPO/IPO/KTO from an ifran pref export
 ./build/tarka --pref prefs.jsonl --early-stop --epochs 600   # options: --epochs --lr --dim --early-stop
 ./build/tarka --help                     # usage
@@ -84,7 +89,8 @@ cyrius test                              # grad-checks, ingestion, units, the go
 ```
 
 The demo runs each milestone end-to-end and prints `ALL GATES PASS` (≈ 1.3 s). `--pref`
-refuses files over 1 MB and prints why each refused row was refused.
+refuses files over 1 MB and prints why each refused row was refused. Under `--gpu`, every line
+but the `GPU: ` ones is the CPU run's, byte for byte.
 
 ## License
 

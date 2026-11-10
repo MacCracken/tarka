@@ -1,4 +1,4 @@
-# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2 + v1.2.2 + v1.3.0 + v1.4.0)
+# tarka — Public API (frozen at v1.0.0; additively extended at v1.1.0 + v1.1.1 + v1.1.2 + v1.2.2 + v1.3.0 + v1.4.0 + v1.5.0)
 
 > Satisfies the v1.0 criterion *"Public RL/reasoning API frozen — every exported symbol
 > documented and tested."*
@@ -15,7 +15,8 @@ signature, and tightened three behaviors, each noted in its row: `ipo_mean_h` sk
 to mis-parse. v1.3.0 added the two-length preference primitives (`dpo_*2`, `ipo_*2`),
 `tarka_pref_ingest_opts` and the `--pref` options, again without changing a signature; its
 aggregated backward moves training results by floating-point rounding (a labeled behavior change,
-[ADR 0002](adr/0002-optimizations-preserve-bits.md)). Each symbol is exercised by the demo (`src/main.cyr`), the suites (`tests/tarka.tcyr`
+[ADR 0002](adr/0002-optimizations-preserve-bits.md)). v1.4.0 added `src/mcts.cyr`; v1.5.0 added the
+device path (`dev_table`, its counters, `--gpu`), again changing no signature and no CPU result. Each symbol is exercised by the demo (`src/main.cyr`), the suites (`tests/tarka.tcyr`
 grad-checks, `tests/pref_ingest.tcyr`, `tests/units.tcyr`, the bit-for-bit `tests/golden.tcyr`),
 and/or the quickstart consumer (`examples/quickstart.cyr`) — noted per row.
 
@@ -208,6 +209,26 @@ calls), `mc_demo`, `mc_opt_action`, `mc_dp_table`, `mc_fill_rewards`, `mc_prompt
 `mc_cand`, `mc_node`, `mc_puct_pick`, `mc_simulate`, `mc_commit_child`, and the `EB_*` / `EN_*` /
 `EC_*` / `ND_*` / `MC_*` tables.
 
+## Device path — `--gpu` (added v1.5.0)
+
+The memo regions' logits tables on the GPU, through rosnet's GPU bundle (`lib/rosnet-gpu.cyr`,
+rosnet ADR 0001) on mabda. Only rosnet's **bit-exact class** is used (`gpu_matmul_fwd`), so every
+result is the CPU's; the gate is parity, not speed — on the reference iGPU it is slower than the CPU at
+every shape tarka has ([ADR 0004](adr/0004-gpu-parity-backend.md)). With `g_gpu = 0` (the default) none
+of it runs.
+
+| symbol | purpose | tested by |
+|--------|---------|-----------|
+| `g_gpu` | rosnet's gate (consumer-set): 1 = a memo miss fills the model's whole logits table on the device; `tarka --gpu` sets it | golden (`--gpu` pass), units, CI |
+| `dev_table(E, W, b, Y)` → 0 / non-0 | `Y(V×V) = E·W + b` for every state at once on the device, `D` zero-padded to rosnet's `GPU_TK()`; non-0 = declined (no device, a shape the device does not take, a failed dispatch), `Y` untouched | units |
+| `g_dev_fills` / `g_dev_declined` | tables the device filled / declined since start | units, golden, demo |
+
+A declined table is computed row by row on the CPU, as without `--gpu`, and each model's table is
+tried once per parameter version.
+
+**Not frozen (internal mechanism):** `pol_miss_logits`, `ref_miss_logits`, `rm_dev_fill`,
+`gpu_start`, `gpu_report`, and the `DV_*` / `PM_lg*` / `RF_lg*` / `RC_try` state.
+
 ## Report formatting — `src/report.cyr` (added v1.2.2)
 
 | symbol | purpose | tested by |
@@ -221,7 +242,8 @@ calls), `mc_demo`, `mc_opt_action`, `mc_dp_table`, `mc_fill_rewards`, `mc_prompt
 `tarka` runs the demo (exit 0 = all gates pass, 1 = a gate failed); `tarka --pref <file>
 [options]` runs the ingestion driver (options above); `tarka --help` prints usage; any other
 argument, a missing file, an unknown or out-of-range `--pref` option prints usage and exits 2
-(v1.2.2; earlier versions ran the demo).
+(v1.2.2; earlier versions ran the demo). A leading `--gpu` (v1.5.0) runs either one with the device
+path on; its own lines start with `GPU: `, and every other line is what the run prints without it.
 
 ## Quickstart
 

@@ -9,11 +9,12 @@ issue with exploit details.
 
 ## Threat model
 
-tarka is a single-process, CPU-only reinforcement-learning + reasoning
-**reference**: numerical compute (policy/value nets, reward/process-reward
-models, preference optimization, self-consistency, best-of-N, PRM-guided beam
-search, prior-guided MCTS) over rosnet `f64` tensors, the tyche PRNG, and the akshara tokenizer. It
-has **no networking** and runs no processes.
+tarka is a single-process reinforcement-learning + reasoning **reference**:
+numerical compute (policy/value nets, reward/process-reward models, preference
+optimization, self-consistency, best-of-N, PRM-guided beam search, prior-guided
+MCTS) over rosnet `f64` tensors, the tyche PRNG, and the akshara tokenizer. It
+runs on the CPU; only `--gpu` (1.5.0) reaches a device, through rosnet's GPU
+bundle on mabda. It has **no networking** and runs no processes.
 
 It reads **one untrusted input**: `tarka --pref <file>`, a JSONL preference
 export (an [ifran](https://github.com/MacCracken/ifran) `pref export`), which may
@@ -52,9 +53,10 @@ tarka *does not* defend against:
 | **Allocation sizing & indexing** | Every `t_alloc` covers the maximum index its consumers reach for the dims its `*_init` recorded; buffers allocated on first use re-size when the rollout length changes. Size products (`g_V*g_D`, `g_V*g_V`, `BMAX*BMAX`, `GMAX*g_T`, `KTO_BMAX*g_T`) cannot overflow i64 at any realistic dimension; `--pref` sizes are bounded by the 1 MB cap. |
 | **The distribution memo** | Inside tarka's own loops, per-state outputs are cached; a cached row is used only if filled in the current region's generation at the model's current parameter version, and every parameter writer bumps the version ([architecture note 001](docs/architecture/001-distribution-memo.md)). Out-of-range states are guarded before the cache is indexed. Each invalidation rule is unit-tested and mutation-checked. |
 | **Numeric robustness** | Softmax uses max-subtraction so probabilities stay strictly positive, keeping `f64_ln` finite on the reference's own paths. NaN / Inf print as `nan` / `inf` rather than as numbers. Residual (accepted, no live trigger): `f64_ln` of a probability that underflowed to exactly 0. |
+| **The device path (`--gpu`)** | Off unless `--gpu` is the first argument; nothing in rosnet's GPU bundle or mabda runs without it. With it, mabda opens the DRM render node (Linux) and maps GTT buffers; the only data sent are tarka's own parameters, padded in buffers `dev_table` sizes from the current dims. rosnet bounds every shape before a dispatch (k-tile, buffer cap, mabda's dispatch cap) and leaves the output untouched on a non-0 return; tarka then computes the rows on the CPU. Only rosnet's bit-exact class is used, so a device cannot change a result: `tests/golden.tcyr` re-runs every case under `--gpu`, and CI compares the `--gpu` demo and `--pref` output with the CPU's ([ADR 0004](docs/adr/0004-gpu-parity-backend.md)). Without a device (CI, aarch64 under qemu) every table is declined. |
 | **akshara's loaders** | `secure_read_file` / `read_stdin` / `file_seek` are stubbed side-effect-free (`return -1`) and unreachable from tarka; the `--pref` file is read with the stdlib's `file_read_all`. |
 | **PRNG** | Deterministic xorshift via tyche — used for rollout sampling and weight init only, **not** for any security purpose. The sign bit is masked before `% g_V` (non-negative modulo). |
-| **Supply chain** | The cyrius toolchain version is pinned in `cyrius.cyml` (the single source of truth); rosnet / tyche / akshara are pinned to exact tags and `cyrius.lock` records every vendored file's hash (`cyrius deps --verify` and `--locked` in CI; `.gitattributes` keeps `lib/` byte-exact). CI's third-party actions are pinned by commit SHA, the CI token is read-only, and checkout does not persist credentials. |
+| **Supply chain** | The cyrius toolchain version is pinned in `cyrius.cyml` (the single source of truth); rosnet / tyche / akshara are pinned to exact tags (mabda is the 6.7.18 snapshot's bundled stdlib leaf) and `cyrius.lock` records every vendored file's hash (`cyrius deps --verify` and `--locked` in CI; `.gitattributes` keeps `lib/` byte-exact). CI's third-party actions are pinned by commit SHA, the CI token is read-only, and checkout does not persist credentials. |
 
 ## Audits
 

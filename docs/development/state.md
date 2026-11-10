@@ -5,6 +5,23 @@
 
 ## Version
 
+**1.5.0** — 2026-11-09. **The 1.5.x line: `--gpu`, a bit-exact parity backend**
+([ADR 0004](../adr/0004-gpu-parity-backend.md)).
+- **What runs on the device.** A memo miss under `--gpu` fills the model's whole logits table
+  (every state's `E·W + b`) in one `gpu_matmul_fwd`, through rosnet's GPU bundle on mabda. This
+  covers the policy, the frozen reference and the reward model, with D zero-padded to the k-tile.
+  Declined tables are computed on the CPU, and the backward and Adam stay on the CPU.
+- **Parity.** The demo under `--gpu` fills 6,321 tables on the reference iGPU, and every line but
+  the `GPU: ` ones is the CPU run's. The golden gate re-runs all 15 cases under `--gpu` against the
+  same digests.
+- **Speed.** Measured before the design and reported, not gated: the device is slower at every shape
+  tarka has (5–20×). The demo takes 31% longer: 2.81 → 3.67 s, alternating runs on a host loaded by
+  other jobs.
+- **Dependencies.** akshara 1.1.2 → **1.3.1** (bit-identical). rosnet's GPU bundle and the bundled
+  stdlib leaf mabda 4.2.0 are now in every build: 1.30 → 2.14 MB.
+- **Tests.** Assertions 266 → **299**, abort probes 18, benchmarks 22, and 11 device-path mutants,
+  all killed.
+
 **1.4.0** — 2026-11-09. **The 1.4.x line: MCTS on a task that warrants it, gated honestly**
 ([ADR 0003](../adr/0003-prior-guided-mcts.md)). `src/mcts.cyr`: the corridor (three zero-reward
 keys before a delayed payoff, a TRAP, a 60-point out-of-order penalty), a behavior-cloned prior,
@@ -157,8 +174,8 @@ scaffold.) **M1 closed** at attn11 1.11.1.
 ## Toolchain
 
 - **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`), the latest release and the pin
-  tyche 1.2.2 / rosnet 1.4.1 / akshara 1.1.2 build against. `lib/` byte-matches the 6.7.18 snapshot,
-  so there is no shadow warning.
+  tyche 1.2.2 / rosnet 1.4.1 / akshara 1.3.1 build against. `lib/` byte-matches the 6.7.18 snapshot
+  (mabda 4.2.0 is its bundled leaf), so there is no shadow warning.
 
 **Pin history:** 6.2.36 → 6.2.37 (0.8.0) → 6.5.27 (1.1.3, 2026-08-17) → 6.6.2 (1.1.4, 2026-09-11) →
 6.6.20 (1.1.5, 2026-11-09) → 6.7.9 (1.2.0, 2026-11-09) → **6.7.18 (1.2.1, 2026-11-09)**. Each bump
@@ -209,6 +226,14 @@ parameter version (`memo_begin` / `memo_end`;
 [architecture note 001](../architecture/001-distribution-memo.md)). Bits unchanged
 ([ADR 0002](../adr/0002-optimizations-preserve-bits.md)).
 
+**The device path — 1.5.0** ([ADR 0004](../adr/0004-gpu-parity-backend.md)):
+- `src/rl.cyr` `dev_table` stages E and W, zero-padded to rosnet's `GPU_TK`, and runs one
+  `gpu_matmul_fwd` per model and parameter version. Each memo then reads its rows from that table:
+  `pol_miss_logits`, `ref_miss_logits` (`src/dpo.cyr`) and `rm_dev_fill` (`src/reward.cyr`). The gate
+  is `g_gpu`, set by `tarka --gpu` (`src/main.cyr` `gpu_start` / `gpu_report`).
+- It uses rosnet's bit-exact class only. `gpu_adam_step` rounds differently from tarka's Adam, and
+  `gpu_linear_bwd` is tolerance-class, so both stay off.
+
 **Prior-guided MCTS — 1.4.0** ([ADR 0003](../adr/0003-prior-guided-mcts.md)):
 - `src/mcts.cyr` — the corridor task (K1 → K2 → K3 open a GOAL worth +4 per step; a TRAP pays +1;
   an out-of-order entry costs 60; optimum by dynamic programming), a policy behavior-cloned from
@@ -241,7 +266,7 @@ parameter version (`memo_begin` / `memo_end`;
 
 ## Tests
 
-**266 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
+**299 assertions in four suites** (`cyrius test` also runs the `src/test.cyr` stub):
 - `tests/tarka.tcyr` — **grad-check suite, 59** (M1: 4; M2: +15 — critic dW/db/dE
   FD-exact; GAE recursion==explicit + return identity; PPO ρ=1==REINFORCE / unclipped FD
   3e-9 / binding-clip→0; GRPO group-norm anchors + ratio=1==REINFORCE; M3: +5 — RM
@@ -251,15 +276,16 @@ parameter version (`memo_begin` / `memo_end`;
   bytes tokenize, raw-vocab refusal, the full escape set, strict labels, field types and line
   structure, identical spans, the row cap and skip counts, KTO class sizes; 1.3.0: +29 — option
   parsers, early stop, each side at its own length).
-- `tests/units.tcyr` — **75** (1.2.2: 38 — the memo's invalidation rules, parity / reasoning /
+- `tests/units.tcyr` — **92** (1.2.2: 38 — the memo's invalidation rules, parity / reasoning /
   search helpers, beam(1,1) == best-of-1, GAE normalization, GRPO's equal group, buffer
   re-sizing; 1.3.0: +6 — the aggregated gradient against the per-token one, discard; 1.4.0: +31 —
-  the corridor's reward and oracle, the stable sort, the tree's visit books).
-- `tests/golden.tcyr` — **15** (1.2.2; 1.4.0: + `mcts`): FNV-1a digests of every trainer's bits,
-  per target.
+  the corridor's reward and oracle, the stable sort, the tree's visit books; 1.5.0: +17 — the device
+  table against linear_fwd at D 8 / 16 / 17, a decline, the --gpu-off path, memo equivalence).
+- `tests/golden.tcyr` — **31** (1.2.2; 1.4.0: + `mcts`; 1.5.0: every case again under `--gpu`, plus
+  the device check — used when present, every table declined when not): FNV-1a digests of every trainer's bits, per target.
 - `tests/abort/` — 18 guard probes (each must exit 1 with the guard's message; run by CI).
 - `tests/tarka.fcyr` — seeded `--pref` fuzz harness, 5 properties × 4,000 rounds (~1.2 s).
-- `tests/tarka.bcyr` — 17 benchmarks; `scripts/bench-history.sh` → `bench-history.csv`.
+- `tests/tarka.bcyr` — 22 benchmarks (the `--gpu` rows only with a device); `scripts/bench-history.sh` → `bench-history.csv`.
 - Reference coverage (`cyrius coverage`): 132 / 208 functions; the demo, run by CI, exercises the rest.
 
 Grad-check discipline (every hand-derived backward verified against central finite
@@ -269,12 +295,15 @@ differences before it lands, inherited from attn11) is **active as of M1**.
 
 Direct (declared in `cyrius.cyml`):
 
-- **stdlib** — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math, args, bayan
+- **stdlib** — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math, args, bayan, and
+  (1.5.0, for `--gpu`) mabda, result, ganita. mabda 4.2.0 is the GPU foundation (device, buffers,
+  dispatch; Linux DRM); nothing in it runs without `--gpu`.
 - **[rosnet](https://github.com/MacCracken/rosnet) 1.4.1** — f64 tensor storage,
-  BLAS-1, matmul + gradient (CPU bundle). The policy/value networks build on this.
+  BLAS-1, matmul + gradient (CPU bundle). The policy/value networks build on this. Since 1.5.0
+  also its GPU bundle (`dist/rosnet-gpu.cyr`), behind `--gpu`.
 - **[tyche](https://github.com/MacCracken/tyche) 1.2.2** — deterministic PRNG for
   on-policy rollout sampling + weight init. (rosnet's `t_randn` resolves through it.)
-- **[akshara](https://github.com/MacCracken/akshara) 1.1.2** (wired 0.2.1) — the
+- **[akshara](https://github.com/MacCracken/akshara) 1.3.1** (wired 0.2.1; 1.1.2 → 1.3.1 at 1.5.0, bit-identical) — the
   sovereign tokenizer (अक्षर); `corpus_set` builds the byte vocab + packed store,
   `gd_ld` indexes it for rollout prompts. Pure path only — loader/streaming/emit
   consumer symbols (`secure_read_file`/`read_stdin`/`file_seek`) are stubbed unreached.
@@ -287,7 +316,7 @@ is the eventual downstream.)
 
 ## Next
 
-1.5.x: a GPU backend through rosnet's GPU bundle. Unscheduled: MCTS on a stochastic or
-adversarial task (where the tree, not only the value, should matter), an aggregated backward for
-the reward model, a `PMIN` floor for `f64_ln`. The 2.0.0 backlog holds the changes
+1.6.x: MCTS on a stochastic or adversarial task, where the tree and not only the value should
+matter. Unscheduled: a GPU path that pays (a device or batched kernel; then `--gpu-tc`), an
+aggregated backward for the reward model, a `PMIN` floor for `f64_ln`. The 2.0.0 backlog holds the changes
 that would break the frozen 1.x API. See [`roadmap.md`](roadmap.md).

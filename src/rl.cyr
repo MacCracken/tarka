@@ -12,7 +12,8 @@
 # (matmul + its gradient); tyche supplies rollout sampling + init. No transformer:
 # the RL loop is the point, the policy is the smallest thing that carries it.
 #
-# Depends on: lib/rosnet.cyr (linear_fwd/linear_bwd, t_*), lib/tyche.cyr (rng_*).
+# Depends on: lib/rosnet.cyr (linear_fwd/linear_bwd, t_*), lib/tyche.cyr (rng_*), and for
+# --gpu lib/rosnet-gpu.cyr (g_gpu, gpu_matmul_fwd, GPU_TK).
 
 # ---- dims / reward (set by pol_init's caller) ------------------------------
 var g_V = 0;        # vocab size
@@ -95,6 +96,62 @@ fn memo_end(): i64 {
     return 0;
 }
 
+# ---- the device path: `tarka --gpu` (1.5.0; docs/adr/0004-gpu-parity-backend.md) ----
+# A memo miss under rosnet's g_gpu fills the whole logits table at once, every state x in
+# one Y(V×V) = E(V×D)·W(D×V) + b, through gpu_matmul_fwd — rosnet's bit-exact class: row x
+# holds the bits linear_fwd gives for state x. The device's k-tile is GPU_TK, so D is
+# zero-padded to a multiple of it; each padded term adds (+0)·(+0), which leaves a sum
+# unchanged unless the sum is −0, and these sums start from a bias tarka never makes −0
+# (t_zero writes +0; an exact cancellation rounds to +0). tests/golden.tcyr re-runs every
+# case under g_gpu and requires the same digests. A table the device declines (no device,
+# a shape it does not take, a failed dispatch: rosnet leaves Y untouched) is computed row
+# by row on the CPU, as without --gpu. With g_gpu = 0 none of this runs.
+var DV_V = 0; var DV_D = 0; var DV_K = 0;   # the dims the staging buffers were sized for
+var DV_x = 0;           # V × K  the embedding, zero-padded to the k-tile
+var DV_w = 0;           # K × V  the head weight, zero-padded
+var g_dev_fills = 0;    # tables the device filled
+var g_dev_declined = 0; # tables it declined (their rows were computed on the CPU)
+var PM_lg = 0;          # V*V   the policy's logits table from the device
+var PM_lgV = 0;         # the V PM_lg was sized for
+var PM_lgtry = 0;       # the PM_epoch a fill was last tried at
+var PM_lgok = 0;        # 1 = that try filled PM_lg
+
+# Y(V×V) = E·W + b for every state at once on the device: 0 = filled, non-0 = declined
+fn dev_table(E, W, b, Y): i64 {
+    if (g_gpu == 0) { return 1; }
+    if ((DV_V != g_V) || (DV_D != g_D)) {
+        var tk = GPU_TK();
+        DV_K = ((g_D + tk - 1) / tk) * tk;
+        DV_x = t_alloc(g_V * DV_K); DV_w = t_alloc(DV_K * g_V);
+        t_zero(DV_x, g_V * DV_K); t_zero(DV_w, DV_K * g_V);
+        DV_V = g_V; DV_D = g_D;
+    }
+    var x = 0;
+    while (x < g_V) { t_copy(DV_x + x * DV_K * 8, E + x * g_D * 8, g_D); x = x + 1; }
+    t_copy(DV_w, W, g_D * g_V);              # rows D..K-1 stay zero
+    if (gpu_matmul_fwd(DV_x, DV_w, b, Y, g_V, DV_K, g_V) != 0) {
+        g_dev_declined = g_dev_declined + 1;
+        return 1;
+    }
+    g_dev_fills = g_dev_fills + 1;
+    return 0;
+}
+
+# S_logits for state x on a memo miss: the device's table when --gpu filled it at this
+# parameter version, else linear_fwd on the CPU
+fn pol_miss_logits(x): i64 {
+    if (g_gpu == 1) {
+        if (PM_lgV != g_V) { PM_lg = t_alloc(g_V * g_V); PM_lgV = g_V; PM_lgtry = 0; }
+        if (PM_lgtry != PM_epoch) {
+            PM_lgtry = PM_epoch;
+            PM_lgok = 0;
+            if (dev_table(P_E, P_W, P_b, PM_lg) == 0) { PM_lgok = 1; }
+        }
+        if (PM_lgok == 1) { t_copy(S_logits, PM_lg + x * g_V * 8, g_V); return 0; }
+    }
+    return pol_logits(x);
+}
+
 # S_probs = pi(.|x): computed, or inside a memo region copied from the cache when the
 # row was filled at the current parameter version.
 fn pol_dist(x): i64 {
@@ -103,7 +160,7 @@ fn pol_dist(x): i64 {
     if (PM_seen != g_memo_gen) { PM_epoch = PM_epoch + 1; PM_seen = g_memo_gen; }
     var row = PM_probs + x * g_V * 8;
     if (load64(PM_stamp + x * 8) == PM_epoch) { t_copy(S_probs, row, g_V); return 0; }
-    pol_logits(x); pol_softmax();
+    pol_miss_logits(x); pol_softmax();
     t_copy(row, S_probs, g_V);
     store64(PM_stamp + x * 8, PM_epoch);
     return 0;
